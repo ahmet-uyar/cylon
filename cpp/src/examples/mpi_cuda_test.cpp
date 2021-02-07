@@ -31,7 +31,7 @@ class CUDAAllocator : public cylon::Allocator {
 public:
     cylon::Status Allocate(int64_t length, std::shared_ptr<cylon::Buffer> *buffer) override {
         uint8_t *b;
-        cudaMallocManaged(&b, N*sizeof(byte));
+        cudaMallocManaged(&b, length * sizeof(char));
         *buffer = std::make_shared<CUDABuffer>(b, length);
         return cylon::Status::OK();
     }
