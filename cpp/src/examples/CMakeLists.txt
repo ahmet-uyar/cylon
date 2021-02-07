@@ -1,5 +1,8 @@
 add_definitions(-DEXAMPLE_CMAKE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}\")
 
+# find CUDA
+find_package(CUDAToolkit REQUIRED)
+
 #build a binary
 macro(cylon_add_exe EXENAME)
     add_executable(${EXENAME} ${EXENAME}.cpp)
@@ -29,7 +32,6 @@ cylon_add_exe(partition_example)
 cylon_add_exe(unique_example)
 cylon_add_exe(unique_bench_example)
 cylon_add_exe(indexing_example)
-cylon_add_exe(mpi_cuda_test)
 
 if (CYLON_PARQUET)
     cylon_add_exe(parquet_test)
@@ -50,4 +52,15 @@ endmacro(cylon_add_exe2)
 cylon_add_exe2(ops com_comm_test)
 cylon_add_exe2(ops join_op_example)
 
+#build a binary with cuda
+macro(cylon_add_exe3 EXENAME)
+    add_executable(${EXENAME} ${EXENAME}.cpp)
+    target_link_libraries(${EXENAME} ${MPI_LIBRARIES})
+    target_link_libraries(${EXENAME} cylon)
+    target_link_libraries(${EXENAME} ${ARROW_LIB})
+    target_link_libraries(${EXENAME} ${GLOG_LIBRARIES})
+    target_link_libraries(${EXENAME} CUDA::cudart)
+    install(TARGETS ${EXENAME} RUNTIME DESTINATION examples)
+endmacro(cylon_add_exe3)
 
+cylon_add_exe3(mpi_cuda_test)

@@ -11,8 +11,32 @@
 #include <ctx/cylon_context.hpp>
 #include <status.hpp>
 #include <net/buffer.hpp>
+#include <cuda_runtime.h>
 
-bool received = false;
+class CUDABuffer : public cylon::Buffer {
+public:
+    int64_t GetLength() override {
+        return length;
+    }
+    uint8_t * GetByteBuffer() override {
+        return buf;
+    }
+    CUDABuffer(uint8_t *buf, int64_t length) : buf(buf), length(length) {}
+private:
+    uint8_t *buf;
+    int64_t length;
+};
+
+class CUDAAllocator : public cylon::Allocator {
+public:
+    cylon::Status Allocate(int64_t length, std::shared_ptr<cylon::Buffer> *buffer) override {
+        uint8_t *b;
+        cudaMallocManaged(&b, N*sizeof(byte));
+        *buffer = std::make_shared<CUDABuffer>(b, length);
+        return cylon::Status::OK();
+    }
+};
+
 
 class RCB : public cylon::ReceiveCallback {
 
@@ -28,7 +52,6 @@ public:
        std::string message;
        message.append(reinterpret_cast<const char*>(buffer->GetByteBuffer()));
         LOG(INFO) << "received a buffer through onReceive with length: " << length << ", " << message;
-        received = true;
      return true;
     }
 
@@ -41,7 +64,6 @@ public:
      */
     bool onReceiveHeader(int source, int finished, int *buffer, int length) {
         LOG(INFO) << "received a header with length: " << length;
-        received = true;
         return true;
     }
 
@@ -74,7 +96,7 @@ int main(int argc, char *argv[]) {
     }
 
     RCB * rcb = new RCB();
-    cylon::DefaultAllocator allocator{};
+    CUDAAllocator allocator{};
     std::shared_ptr<cylon::Buffer> buffer = std::make_shared<cylon::DefaultBuffer>(nullptr, 0);
     cylon::Status stat = allocator.Allocate(20, &buffer);
     if (!stat.is_ok()) {
