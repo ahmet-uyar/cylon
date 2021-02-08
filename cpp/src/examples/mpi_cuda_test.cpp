@@ -33,12 +33,11 @@ public:
     * This function is called when a data is received
     */
    bool onReceive(int source, std::shared_ptr<cylon::Buffer> buffer, int length) {
-//       std::string message;
-//       message.append(reinterpret_cast<const char*>(buffer->GetByteBuffer()));
-//       LOG(INFO) << myrank << ", Received a buffer: " << message;
+       int32_t *rankArray = (int32_t *) buffer->GetByteBuffer();
+
        std::string message;
-       for (int i = 0; i < length; ++i) {
-           message += std::to_string((uint)(buffer->GetByteBuffer()[i]));
+       for (int i = 0; i < length/sizeof(int32_t); ++i) {
+           message += std::to_string(rankArray[i]);
        }
        LOG(INFO) << myrank << ": Received a buffer: " << message;
        return true;
@@ -95,15 +94,16 @@ int main(int argc, char *argv[]) {
     std::shared_ptr<cylon::AllToAll> all =
             std::make_shared<cylon::AllToAll>(ctx, allWorkers, allWorkers, ctx->GetNextSequence(), rcb, &allocator);
 
-    uint8_t *sendBuffer;
+    int32_t *rankArray;
     int length = 20;
-    cudaMallocManaged(&sendBuffer, length * sizeof(char));
+    cudaMallocManaged(&rankArray, length * sizeof(int32_t));
     for (int i = 0; i < length; ++i) {
-        sendBuffer[i] = myrank;
+        rankArray[i] = myrank;
     }
+    uint8_t *sendBuffer = (uint8_t *) rankArray;
 
     for (int wID: allWorkers) {
-        all->insert(sendBuffer, length, wID);
+        all->insert(sendBuffer, length * sizeof(int32_t), wID);
     }
 
     all->finish();
