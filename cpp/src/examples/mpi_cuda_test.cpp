@@ -33,9 +33,14 @@ public:
     * This function is called when a data is received
     */
    bool onReceive(int source, std::shared_ptr<cylon::Buffer> buffer, int length) {
+//       std::string message;
+//       message.append(reinterpret_cast<const char*>(buffer->GetByteBuffer()));
+//       LOG(INFO) << myrank << ", Received a buffer: " << message;
        std::string message;
-       message.append(reinterpret_cast<const char*>(buffer->GetByteBuffer()));
-       LOG(INFO) << myrank << ", Received a buffer: " << message;
+       for (int i = 0; i < length; ++i) {
+           message += std::to_string((uint)(buffer->GetByteBuffer()[i]));
+       }
+       LOG(INFO) << myrank << ": Received a buffer: " << message;
        return true;
    }
 
@@ -83,18 +88,20 @@ int main(int argc, char *argv[]) {
     std::shared_ptr<cylon::AllToAll> all =
             std::make_shared<cylon::AllToAll>(ctx, allWorkers, allWorkers, ctx->GetNextSequence(), rcb, &allocator);
 
-    std::string message("hello from ");
-    message += std::to_string(myrank);
+    uint8_t *sendBuffer;
+    int length = 20;
+    cudaMallocManaged(&sendBuffer, length * sizeof(char));
+    for (int i = 0; i < length; ++i) {
+        sendBuffer[i] = myrank;
+    }
 
-    char msg[20];
-    strcpy(msg, message.c_str());
-    using namespace std::chrono_literals;
     for (int wID: allWorkers) {
-        all->insert(msg, message.length() + 1, wID);
+        all->insert(sendBuffer, length, wID);
     }
 
     all->finish();
 
+    using namespace std::chrono_literals;
     int i = 1;
     while(!all->isComplete()) {
         if (i % 10 == 0) {
