@@ -77,6 +77,13 @@ int main(int argc, char *argv[]) {
         allWorkers.push_back(i);
     }
 
+    int numberOfGPUs;
+    cudaGetDeviceCount(&numberOfGPUs);
+    LOG(INFO) << "myrank: "  << myrank << ", number of GPUs: " << numberOfGPUs;
+
+    // set the gpu
+    cudaSetDevice(myrank % numberOfGPUs);
+
     RCB * rcb = new RCB();
     CUDAAllocator allocator{};
     std::shared_ptr<cylon::Buffer> buffer;
