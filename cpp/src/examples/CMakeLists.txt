@@ -64,3 +64,40 @@ macro(cylon_add_exe3 EXENAME)
 endmacro(cylon_add_exe3)
 
 cylon_add_exe3(mpi_cuda_test)
+
+###################################################################
+# add cuda include dir
+SET(CONDA_DIR /home/auyar/anaconda3/envs/cudf_dev/)
+include_directories(
+        ${CONDA_DIR}/include
+        ${CONDA_DIR}/include/libcudf/libcudacxx/
+)
+
+#build a binary with cuda
+macro(cylon_add_exe4 EXENAME)
+    add_executable(${EXENAME} ${EXENAME})
+    target_link_libraries(${EXENAME} ${MPI_LIBRARIES})
+    target_link_libraries(${EXENAME} cylon)
+    target_link_libraries(${EXENAME} ${ARROW_LIB})
+    target_link_libraries(${EXENAME} ${GLOG_LIBRARIES})
+    target_link_libraries(${EXENAME} CUDA::cudart)
+    target_link_libraries(${EXENAME}
+            ${CONDA_DIR}/lib/libcudf_ast.so
+            ${CONDA_DIR}/lib/libcudf_interop.so
+            ${CONDA_DIR}/lib/libcudf_partitioning.so
+            ${CONDA_DIR}/lib/libcudf_rolling.so
+            ${CONDA_DIR}/lib/libcudf_base.so
+            ${CONDA_DIR}/lib/libcudf_io.so
+            ${CONDA_DIR}/lib/libcudf_reductions.so
+            ${CONDA_DIR}/lib/libcudf.so
+            ${CONDA_DIR}/lib/libcudf_comms.so
+            ${CONDA_DIR}/lib/libcudf_join.so
+            ${CONDA_DIR}/lib/libcudf_replace.so
+            ${CONDA_DIR}/lib/libcudf_hash.so
+            ${CONDA_DIR}/lib/libcudf_merge.so
+            ${CONDA_DIR}/lib/libcudf_reshape.so
+            ${CONDA_DIR}/lib/libcudf_transpose.so
+            )
+    install(TARGETS ${EXENAME} RUNTIME DESTINATION examples)
+endmacro(cylon_add_exe4)
+cylon_add_exe4(mpi_cudf_test.cpp)
