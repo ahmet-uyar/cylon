@@ -75,7 +75,7 @@ include_directories(
 
 #build a binary with cuda
 macro(cylon_add_exe4 EXENAME)
-    add_executable(${EXENAME} ${EXENAME})
+    add_executable(${EXENAME} ${EXENAME}.cpp)
     target_link_libraries(${EXENAME} ${MPI_LIBRARIES})
     target_link_libraries(${EXENAME} cylon)
     target_link_libraries(${EXENAME} ${ARROW_LIB})
@@ -100,4 +100,6 @@ macro(cylon_add_exe4 EXENAME)
             )
     install(TARGETS ${EXENAME} RUNTIME DESTINATION examples)
 endmacro(cylon_add_exe4)
-cylon_add_exe4(mpi_cudf_test.cpp)
+
+cylon_add_exe4(mpi_cudf_test)
+cylon_add_exe4(cudf_a2a)
