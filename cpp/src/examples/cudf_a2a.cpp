@@ -72,6 +72,7 @@ public:
     * This function is called when a data is received
     */
    bool onReceive(int source, std::shared_ptr<cylon::Buffer> buffer, int length) {
+       LOG(INFO) << "buffer received from the source: " << source;
        std::shared_ptr<CudfBuffer> cb = std::dynamic_pointer_cast<CudfBuffer>(buffer);
 
        uint8_t *hostArray= (uint8_t*)malloc(length);
@@ -83,6 +84,8 @@ public:
        } else if (data_type == 4) {
            int64_t *hdata = (int64_t *) hostArray;
            LOG(INFO) << "==== data[0]: " << hdata[0] << ", data[1]: " << hdata[1];
+       } else {
+           LOG(WARNING) << "Unrecognized data type ==== : " << data_type ;
        }
 
        return true;
@@ -143,10 +146,6 @@ int main(int argc, char *argv[]) {
     cudf::io::csv_reader_options options = cudf::io::csv_reader_options::builder(si);
     cudf::io::table_with_metadata ctable = cudf::io::read_csv(options);
     std::cout << "number of columns: " << ctable.tbl->num_columns() << std::endl;
-    int columnIndex = myrank;
-    cudf::column_view cw = ctable.tbl->get_column(columnIndex).view();
-    std::cout << "column[" << columnIndex << "] size: " << cw.size() << std::endl;
-
 
     auto start_start = std::chrono::steady_clock::now();
     auto mpi_config = std::make_shared<cylon::net::MPIConfig>();
@@ -178,15 +177,21 @@ int main(int argc, char *argv[]) {
     std::shared_ptr<cylon::AllToAll> all =
             std::make_shared<cylon::AllToAll>(ctx, allWorkers, allWorkers, ctx->GetNextSequence(), rcb, &allocator);
 
-    auto headers = std::make_shared<std::vector<int32_t>>();
-    headers->push_back((int32_t)(cw.type().id()));
-    headers->push_back(myrank);
-
+    // column data
+    int columnIndex = myrank;
+    cudf::column_view cw = ctable.tbl->get_column(columnIndex).view();
+    std::cout << "column[" << columnIndex << "] size: " << cw.size() << std::endl;
     uint8_t *sendBuffer = (uint8_t *)cw.data<uint8_t>();
     int dataLen = dataLength(cw);
 
+    // header data
+    int headerLen = 2;
+    int * headers = new int[headerLen];
+    headers[0] = (int)(cw.type().id());
+    headers[1] = myrank;
+
     for (int wID: allWorkers) {
-        all->insert(sendBuffer, dataLen, wID, headers->data(), headers->size());
+        all->insert(sendBuffer, dataLen, wID, headers, headerLen);
     }
 
     all->finish();
