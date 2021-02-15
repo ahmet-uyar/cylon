@@ -53,7 +53,7 @@ class ReceiveCallback {
    * @param length
    * @return
    */
-  virtual bool onSendComplete(int target, void *buffer, int length) = 0;
+  virtual bool onSendComplete(int target, const void *buffer, int length) = 0;
 };
 
 enum AllToAllSendStatus {
@@ -98,7 +98,7 @@ class AllToAll : public ChannelReceiveCallback, ChannelSendCallback {
    * @param target the target to send the message
    * @return true if the buffer is accepted
    */
-  int insert(void *buffer, int length, int target, int *header, int headerLength);
+  int insert(const void *buffer, int length, int target, int *header, int headerLength);
 
   /**
    * Insert a buffer to be sent, if the buffer is accepted return true

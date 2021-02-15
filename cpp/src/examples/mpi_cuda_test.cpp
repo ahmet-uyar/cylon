@@ -55,7 +55,7 @@ public:
      * This method is called after we successfully send a buffer
      * @return
      */
-    bool onSendComplete(int target, void *buffer, int length) {
+    bool onSendComplete(int target, const void *buffer, int length) {
 //        LOG(INFO) << "called onSendComplete with length: " << length << " for the target: " << target;
         return true;
     }

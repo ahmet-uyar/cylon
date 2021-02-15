@@ -75,7 +75,7 @@ public:
        LOG(INFO) << "buffer received from the source: " << source;
        std::shared_ptr<CudfBuffer> cb = std::dynamic_pointer_cast<CudfBuffer>(buffer);
 
-       uint8_t *hostArray= (uint8_t*)malloc(length);
+       uint8_t *hostArray= new uint8_t[length];
        cudaMemcpy(hostArray, cb->GetByteBuffer(), length, cudaMemcpyDeviceToHost);
 
        if (data_type == 3) {
@@ -104,7 +104,7 @@ public:
      * This method is called after we successfully send a buffer
      * @return
      */
-    bool onSendComplete(int target, void *buffer, int length) {
+    bool onSendComplete(int target, const void *buffer, int length) {
 //        LOG(INFO) << "called onSendComplete with length: " << length << " for the target: " << target;
         return true;
     }
@@ -168,20 +168,22 @@ int main(int argc, char *argv[]) {
 
     RCB * rcb = new RCB();
     CudfAllocator allocator{};
-    std::shared_ptr<cylon::Buffer> buffer;
-    cylon::Status stat = allocator.Allocate(20, &buffer);
-    if (!stat.is_ok()) {
-        LOG(FATAL) << "Failed to allocate buffer with length " << 20;
-    }
+//    std::shared_ptr<cylon::Buffer> buffer;
+//    cylon::Status stat = allocator.Allocate(20, &buffer);
+//    if (!stat.is_ok()) {
+//        LOG(FATAL) << "Failed to allocate buffer with length " << 20;
+//    }
 
     std::shared_ptr<cylon::AllToAll> all =
             std::make_shared<cylon::AllToAll>(ctx, allWorkers, allWorkers, ctx->GetNextSequence(), rcb, &allocator);
+
+    LOG(INFO) << myrank << ": after all-to-all call.";
 
     // column data
     int columnIndex = myrank;
     cudf::column_view cw = ctable.tbl->get_column(columnIndex).view();
     std::cout << "column[" << columnIndex << "] size: " << cw.size() << std::endl;
-    uint8_t *sendBuffer = (uint8_t *)cw.data<uint8_t>();
+    const uint8_t *sendBuffer = cw.data<uint8_t>();
     int dataLen = dataLength(cw);
 
     // header data

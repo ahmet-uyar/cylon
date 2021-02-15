@@ -21,7 +21,7 @@ namespace cylon {
 class TxRequest {
 
  public:
-  void *buffer{};
+  const void *buffer{};
   int length{};
   int target;
   int header[6] = {};
@@ -29,7 +29,7 @@ class TxRequest {
 
   TxRequest(int tgt, void *buf, int len);
 
-  TxRequest(int tgt, void *buf, int len, int *head, int hLength);
+  TxRequest(int tgt, const void *buf, int len, int *head, int hLength);
 
   explicit TxRequest(int tgt);
 
