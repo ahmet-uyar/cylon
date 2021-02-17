@@ -3,8 +3,6 @@
 //
 
 #include <glog/logging.h>
-#include <chrono>
-#include <thread>
 
 #include <net/ops/all_to_all.hpp>
 #include <net/mpi/mpi_communicator.hpp>
@@ -27,14 +25,13 @@ int myrank = -1;
 
 class CudfBuffer : public cylon::Buffer {
 public:
-    CudfBuffer(std::shared_ptr<rmm::device_buffer> rmmBuf) :
-        rmmBuf(std::move(rmmBuf)), length(rmmBuf->size()) {}
+    CudfBuffer(std::shared_ptr<rmm::device_buffer> rmmBuf) : rmmBuf(std::move(rmmBuf)) {}
 
     int64_t GetLength() override {
-        return length;
+        return rmmBuf->size();
     }
 
-    uint8_t *GetByteBuffer() override {
+    uint8_t * GetByteBuffer() override {
         return (uint8_t *)rmmBuf->data();
     }
 
@@ -44,7 +41,6 @@ public:
 
 private:
     std::shared_ptr<rmm::device_buffer> rmmBuf;
-    int64_t length;
 };
 
 
@@ -88,6 +84,8 @@ public:
            LOG(WARNING) << "Unrecognized data type ==== : " << data_type ;
        }
 
+       // unset data_type
+       data_type = -1;
        return true;
    }
 
@@ -95,7 +93,9 @@ public:
      * Receive the header, this happens before we receive the actual data
      */
     bool onReceiveHeader(int source, int finished, int *buffer, int length) {
-        data_type = buffer[0];
+        if (length > 0) {
+            data_type = buffer[0];
+        }
         LOG(INFO) << "----received a header buffer with length: " << length;
         return true;
     }
@@ -133,6 +133,39 @@ cudf::size_type dataLength(cudf::column_view const& input){
     return elementSize * input.size();
 }
 
+void testAllocator() {
+    CudfAllocator allocator{};
+    std::shared_ptr<cylon::Buffer> buffer;
+    cylon::Status stat = allocator.Allocate(20, &buffer);
+    if (!stat.is_ok()) {
+        LOG(FATAL) << "Failed to allocate buffer with length " << 20;
+    }
+
+    std::shared_ptr<CudfBuffer> cb = std::dynamic_pointer_cast<CudfBuffer>(buffer);
+    std::cout << "buffer length: " << cb->GetLength() << std::endl;
+    uint8_t *hostArray= new uint8_t[cb->GetLength()];
+    cudaMemcpy(hostArray, cb->GetByteBuffer(), cb->GetLength(), cudaMemcpyDeviceToHost);
+    std::cout << "copied from device to host" << std::endl;
+}
+
+void testColumnAccess(cudf::column_view const& input) {
+    int dl = dataLength(input);
+    LOG(INFO) << myrank << ": dataLength: " << dl;
+    LOG(INFO) << myrank << ": column data type: " << static_cast<int>(input.type().id());
+
+    uint8_t *hostArray= new uint8_t[dl];
+    cudaMemcpy(hostArray, input.data<uint8_t>(), dl, cudaMemcpyDeviceToHost);
+    int64_t * hdata = (int64_t *) hostArray;
+    std::cout << "first data: " << hdata[0] << std::endl;
+    LOG(INFO) << myrank << ": first 2 data: " << hdata[0] << ", " << hdata[1];
+}
+
+void columnDataTypes(cudf::table * table) {
+    for (int i = 0; i < table->num_columns(); ++i) {
+        cudf::column_view cw = table->get_column(i).view();
+        LOG(INFO) << myrank << ", column: " << i << ", size: " << cw.size() << ", data type: " << static_cast<int>(cw.type().id());
+    }
+}
 
 int main(int argc, char *argv[]) {
 
@@ -141,13 +174,6 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    std::string input_csv_file = argv[1];
-    cudf::io::source_info si(input_csv_file);
-    cudf::io::csv_reader_options options = cudf::io::csv_reader_options::builder(si);
-    cudf::io::table_with_metadata ctable = cudf::io::read_csv(options);
-    std::cout << "number of columns: " << ctable.tbl->num_columns() << std::endl;
-
-    auto start_start = std::chrono::steady_clock::now();
     auto mpi_config = std::make_shared<cylon::net::MPIConfig>();
     auto ctx = cylon::CylonContext::InitDistributed(mpi_config);
     myrank = ctx->GetRank();
@@ -167,21 +193,23 @@ int main(int argc, char *argv[]) {
     cudaSetDevice(myrank % numberOfGPUs);
 
     RCB * rcb = new RCB();
-    CudfAllocator allocator{};
-//    std::shared_ptr<cylon::Buffer> buffer;
-//    cylon::Status stat = allocator.Allocate(20, &buffer);
-//    if (!stat.is_ok()) {
-//        LOG(FATAL) << "Failed to allocate buffer with length " << 20;
-//    }
-
+    CudfAllocator * allocator = new CudfAllocator();
     std::shared_ptr<cylon::AllToAll> all =
-            std::make_shared<cylon::AllToAll>(ctx, allWorkers, allWorkers, ctx->GetNextSequence(), rcb, &allocator);
+            std::make_shared<cylon::AllToAll>(ctx, allWorkers, allWorkers, ctx->GetNextSequence(), rcb, allocator);
 
-    LOG(INFO) << myrank << ": after all-to-all call.";
+    LOG(INFO) << myrank << ": after all-to-all init.";
+
+    // construct table
+    std::string input_csv_file = argv[1];
+    cudf::io::source_info si(input_csv_file);
+    cudf::io::csv_reader_options options = cudf::io::csv_reader_options::builder(si);
+    cudf::io::table_with_metadata ctable = cudf::io::read_csv(options);
+    std::cout << "number of columns: " << ctable.tbl->num_columns() << std::endl;
 
     // column data
     int columnIndex = myrank;
     cudf::column_view cw = ctable.tbl->get_column(columnIndex).view();
+//    testColumnAccess(cw);
     std::cout << "column[" << columnIndex << "] size: " << cw.size() << std::endl;
     const uint8_t *sendBuffer = cw.data<uint8_t>();
     int dataLen = dataLength(cw);
@@ -198,12 +226,10 @@ int main(int argc, char *argv[]) {
 
     all->finish();
 
-    using namespace std::chrono_literals;
     int i = 1;
     while(!all->isComplete()) {
-        if (i % 10 == 0) {
+        if (i % 100 == 0) {
             LOG(INFO) << myrank << ", has not completed yet.";
-            std::this_thread::sleep_for(1000ms);
         }
         i++;
     }
