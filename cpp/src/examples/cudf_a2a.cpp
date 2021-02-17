@@ -3,6 +3,9 @@
 //
 
 #include <glog/logging.h>
+#include <chrono>
+#include <thread>
+#include <unordered_map>
 
 #include <net/ops/all_to_all.hpp>
 #include <net/mpi/mpi_communicator.hpp>
@@ -62,7 +65,7 @@ public:
 class RCB : public cylon::ReceiveCallback {
 
 public:
-    RCB() : data_type(-1) {}
+    RCB() : data_types() {}
 
    /**
     * This function is called when a data is received
@@ -74,18 +77,16 @@ public:
        uint8_t *hostArray= new uint8_t[length];
        cudaMemcpy(hostArray, cb->GetByteBuffer(), length, cudaMemcpyDeviceToHost);
 
-       if (data_type == 3) {
+       if (data_types.at(source) == 3) {
            int32_t * hdata = (int32_t *) hostArray;
            LOG(INFO) << "==== data[0]: " << hdata[0] << ", data[1]: " << hdata[1];
-       } else if (data_type == 4) {
+       } else if (data_types.at(source) == 4) {
            int64_t *hdata = (int64_t *) hostArray;
            LOG(INFO) << "==== data[0]: " << hdata[0] << ", data[1]: " << hdata[1];
        } else {
-           LOG(WARNING) << "Unrecognized data type ==== : " << data_type ;
+           LOG(WARNING) << "Unrecognized data type ==== : " << data_types.at(source);
        }
 
-       // unset data_type
-       data_type = -1;
        return true;
    }
 
@@ -94,7 +95,7 @@ public:
      */
     bool onReceiveHeader(int source, int finished, int *buffer, int length) {
         if (length > 0) {
-            data_type = buffer[0];
+            data_types.insert({source, buffer[0]});
         }
         LOG(INFO) << "----received a header buffer with length: " << length;
         return true;
@@ -110,7 +111,7 @@ public:
     }
 
 private:
-    int data_type;
+    std::unordered_map<int, int> data_types;
 };
 
 // sizes of cudf types in tables
@@ -204,13 +205,13 @@ int main(int argc, char *argv[]) {
     cudf::io::source_info si(input_csv_file);
     cudf::io::csv_reader_options options = cudf::io::csv_reader_options::builder(si);
     cudf::io::table_with_metadata ctable = cudf::io::read_csv(options);
-    std::cout << "number of columns: " << ctable.tbl->num_columns() << std::endl;
+    LOG(INFO) << myrank << ", number of columns: " << ctable.tbl->num_columns();
 
     // column data
     int columnIndex = myrank;
     cudf::column_view cw = ctable.tbl->get_column(columnIndex).view();
 //    testColumnAccess(cw);
-    std::cout << "column[" << columnIndex << "] size: " << cw.size() << std::endl;
+    LOG(INFO) << myrank << ", column[" << columnIndex << "] size: " << cw.size();
     const uint8_t *sendBuffer = cw.data<uint8_t>();
     int dataLen = dataLength(cw);
 
@@ -230,6 +231,7 @@ int main(int argc, char *argv[]) {
     while(!all->isComplete()) {
         if (i % 100 == 0) {
             LOG(INFO) << myrank << ", has not completed yet.";
+            std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         i++;
     }
