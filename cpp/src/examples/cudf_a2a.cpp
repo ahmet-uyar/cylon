@@ -24,96 +24,93 @@
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/detail/error.hpp>
 
+#include "cudf_a2a.hpp"
+
 int myrank = -1;
 
-class CudfBuffer : public cylon::Buffer {
-public:
-    CudfBuffer(std::shared_ptr<rmm::device_buffer> rmmBuf) : rmmBuf(std::move(rmmBuf)) {}
+//////////////////////////////////////////////////////////////////////
+// CudfBuffer implementations
+//////////////////////////////////////////////////////////////////////
+CudfBuffer::CudfBuffer(std::shared_ptr<rmm::device_buffer> rmmBuf) : rmmBuf(std::move(rmmBuf)) {}
 
-    int64_t GetLength() override {
-        return rmmBuf->size();
-    }
+int64_t CudfBuffer::GetLength() {
+  return rmmBuf->size();
+}
 
-    uint8_t * GetByteBuffer() override {
-        return (uint8_t *)rmmBuf->data();
-    }
+uint8_t * CudfBuffer::GetByteBuffer() {
+  return (uint8_t *)rmmBuf->data();
+}
 
-    std::shared_ptr<rmm::device_buffer> getBuf() const {
-        return rmmBuf;
-    }
+std::shared_ptr<rmm::device_buffer> CudfBuffer::getBuf() const {
+  return rmmBuf;
+}
 
-private:
-    std::shared_ptr<rmm::device_buffer> rmmBuf;
-};
+//////////////////////////////////////////////////////////////////////
+// CudfAllocator implementations
+//////////////////////////////////////////////////////////////////////
+cylon::Status CudfAllocator::Allocate(int64_t length, std::shared_ptr<cylon::Buffer> *buffer) {
+  std::shared_ptr<rmm::device_buffer> rmmBuf;
+  try {
+    rmmBuf = std::make_shared<rmm::device_buffer>(length);
+  } catch (rmm::bad_alloc	badAlloc) {
+    LOG(ERROR) << "failed to allocate gpu memory with rmm: " << badAlloc.what();
+    return cylon::Status(cylon::Code::GpuMemoryError);
+  }
+  *buffer = std::make_shared<CudfBuffer>(rmmBuf);
+  return cylon::Status::OK();
+}
 
+//////////////////////////////////////////////////////////////////////
+// CudfAllToAll implementations
+//////////////////////////////////////////////////////////////////////
+CudfAllToAll::CudfAllToAll() : data_types() {}
 
-class CudfAllocator : public cylon::Allocator {
-public:
-    cylon::Status Allocate(int64_t length, std::shared_ptr<cylon::Buffer> *buffer) override {
-        std::shared_ptr<rmm::device_buffer> rmmBuf;
-        try {
-            rmmBuf = std::make_shared<rmm::device_buffer>(length);
-        } catch (rmm::bad_alloc	badAlloc) {
-            LOG(ERROR) << "failed to allocate gpu memory with rmm: " << badAlloc.what();
-            return cylon::Status(cylon::Code::GpuMemoryError);
-        }
-        *buffer = std::make_shared<CudfBuffer>(rmmBuf);
-        return cylon::Status::OK();
-    }
-};
+/**
+ * This function is called when a data is received
+ */
+bool CudfAllToAll::onReceive(int source, std::shared_ptr<cylon::Buffer> buffer, int length) {
+  LOG(INFO) << "buffer received from the source: " << source;
+  std::shared_ptr<CudfBuffer> cb = std::dynamic_pointer_cast<CudfBuffer>(buffer);
 
-class RCB : public cylon::ReceiveCallback {
+  uint8_t *hostArray= new uint8_t[length];
+  cudaMemcpy(hostArray, cb->GetByteBuffer(), length, cudaMemcpyDeviceToHost);
 
-public:
-    RCB() : data_types() {}
+  if (data_types.at(source) == 3) {
+    int32_t * hdata = (int32_t *) hostArray;
+    LOG(INFO) << "==== data[0]: " << hdata[0] << ", data[1]: " << hdata[1];
+  } else if (data_types.at(source) == 4) {
+    int64_t *hdata = (int64_t *) hostArray;
+    LOG(INFO) << "==== data[0]: " << hdata[0] << ", data[1]: " << hdata[1];
+  } else {
+    LOG(WARNING) << "Unrecognized data type ==== : " << data_types.at(source);
+  }
 
-   /**
-    * This function is called when a data is received
-    */
-   bool onReceive(int source, std::shared_ptr<cylon::Buffer> buffer, int length) {
-       LOG(INFO) << "buffer received from the source: " << source;
-       std::shared_ptr<CudfBuffer> cb = std::dynamic_pointer_cast<CudfBuffer>(buffer);
+  return true;
+}
 
-       uint8_t *hostArray= new uint8_t[length];
-       cudaMemcpy(hostArray, cb->GetByteBuffer(), length, cudaMemcpyDeviceToHost);
+/**
+ * Receive the header, this happens before we receive the actual data
+ */
+bool CudfAllToAll::onReceiveHeader(int source, int finished, int *buffer, int length) {
+  if (length > 0) {
+    data_types.insert({source, buffer[0]});
+  }
+  LOG(INFO) << "----received a header buffer with length: " << length;
+  return true;
+}
 
-       if (data_types.at(source) == 3) {
-           int32_t * hdata = (int32_t *) hostArray;
-           LOG(INFO) << "==== data[0]: " << hdata[0] << ", data[1]: " << hdata[1];
-       } else if (data_types.at(source) == 4) {
-           int64_t *hdata = (int64_t *) hostArray;
-           LOG(INFO) << "==== data[0]: " << hdata[0] << ", data[1]: " << hdata[1];
-       } else {
-           LOG(WARNING) << "Unrecognized data type ==== : " << data_types.at(source);
-       }
-
-       return true;
-   }
-
-    /**
-     * Receive the header, this happens before we receive the actual data
-     */
-    bool onReceiveHeader(int source, int finished, int *buffer, int length) {
-        if (length > 0) {
-            data_types.insert({source, buffer[0]});
-        }
-        LOG(INFO) << "----received a header buffer with length: " << length;
-        return true;
-    }
-
-    /**
-     * This method is called after we successfully send a buffer
-     * @return
-     */
-    bool onSendComplete(int target, const void *buffer, int length) {
+/**
+ * This method is called after we successfully send a buffer
+ * @return
+ */
+bool CudfAllToAll::onSendComplete(int target, const void *buffer, int length) {
 //        LOG(INFO) << "called onSendComplete with length: " << length << " for the target: " << target;
-        return true;
-    }
+  return true;
+}
 
-private:
-    std::unordered_map<int, int> data_types;
-};
-
+//////////////////////////////////////////////////////////////////////
+// test functions
+//////////////////////////////////////////////////////////////////////
 // sizes of cudf types in tables
 // ref: type_id in cudf/types.hpp
 int type_bytes[] = {0, 1, 2, 4, 8, 1, 2, 4, 8, 4, 8, 1, 4, 8, 8, 8, 8, 4, 8, 8, 8, 8, -1, -1, -1, 4, 8, -1, -1};
@@ -193,10 +190,10 @@ int main(int argc, char *argv[]) {
     // set the gpu
     cudaSetDevice(myrank % numberOfGPUs);
 
-    RCB * rcb = new RCB();
+    CudfAllToAll * cA2A = new CudfAllToAll();
     CudfAllocator * allocator = new CudfAllocator();
     std::shared_ptr<cylon::AllToAll> all =
-            std::make_shared<cylon::AllToAll>(ctx, allWorkers, allWorkers, ctx->GetNextSequence(), rcb, allocator);
+            std::make_shared<cylon::AllToAll>(ctx, allWorkers, allWorkers, ctx->GetNextSequence(), cA2A, allocator);
 
     LOG(INFO) << myrank << ": after all-to-all init.";
 
