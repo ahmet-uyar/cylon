@@ -73,7 +73,7 @@ cudf::size_type dataLength(cudf::column_view const& cw){
 //////////////////////////////////////////////////////////////////////
 // CudfBuffer implementations
 //////////////////////////////////////////////////////////////////////
-CudfBuffer::CudfBuffer(std::shared_ptr<rmm::device_buffer> rmmBuf) : rmmBuf(std::move(rmmBuf)) {}
+CudfBuffer::CudfBuffer(std::shared_ptr<rmm::device_buffer> rmmBuf) : rmmBuf(rmmBuf) {}
 
 int64_t CudfBuffer::GetLength() {
   return rmmBuf->size();
@@ -91,15 +91,14 @@ std::shared_ptr<rmm::device_buffer> CudfBuffer::getBuf() const {
 // CudfAllocator implementations
 //////////////////////////////////////////////////////////////////////
 cylon::Status CudfAllocator::Allocate(int64_t length, std::shared_ptr<cylon::Buffer> *buffer) {
-  std::shared_ptr<rmm::device_buffer> rmmBuf;
   try {
-    rmmBuf = std::make_shared<rmm::device_buffer>(length);
-  } catch (rmm::bad_alloc	badAlloc) {
+    auto rmmBuf = std::make_shared<rmm::device_buffer>(length);
+    *buffer = std::make_shared<CudfBuffer>(rmmBuf);
+    return cylon::Status::OK();
+  } catch (rmm::bad_alloc badAlloc) {
     LOG(ERROR) << "failed to allocate gpu memory with rmm: " << badAlloc.what();
     return cylon::Status(cylon::Code::GpuMemoryError);
   }
-  *buffer = std::make_shared<CudfBuffer>(rmmBuf);
-  return cylon::Status::OK();
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -113,6 +112,7 @@ CudfAllToAll::CudfAllToAll(std::shared_ptr<cylon::CylonContext> &ctx,
     sources_(sources),
     targets_(targets),
     recv_callback_(std::move(callback)),
+    myrank(ctx->GetRank()),
     completed_(false),
     finishCalled_(false){
 
@@ -131,11 +131,11 @@ CudfAllToAll::CudfAllToAll(std::shared_ptr<cylon::CylonContext> &ctx,
     }
 }
 
-int CudfAllToAll::insert(const std::shared_ptr<cudf::table> &table, int32_t target) {
+int CudfAllToAll::insert(const std::shared_ptr<cudf::table_view> &table, int32_t target) {
     return insert(table, target, -1);
 }
 
-int CudfAllToAll::insert(const std::shared_ptr<cudf::table> &table,
+int CudfAllToAll::insert(const std::shared_ptr<cudf::table_view> &table,
                           int32_t target,
                           int32_t reference) {
     // todo: check weather we have enough memory
@@ -147,15 +147,21 @@ int CudfAllToAll::insert(const std::shared_ptr<cudf::table> &table,
 bool CudfAllToAll::isComplete() {
 
     for (const auto &t : inputs_) {
-      std::pair<std::shared_ptr<cudf::table>, int32_t> currentPair = t.second->tableQueue.front();
-      t.second->tableQueue.pop();
-      insertTableToA2A(currentPair.first, t.first, currentPair.second);
+        if (!t.second->tableQueue.empty()) {
+          std::pair<std::shared_ptr<cudf::table_view>, int32_t> currentPair = t.second->tableQueue.front();
+          t.second->tableQueue.pop();
+          insertTableToA2A(currentPair.first, t.first, currentPair.second);
+          LOG(INFO) << myrank << ", inserted table for A2A. target: " << t.first << ", ref: " << currentPair.second;
+        }
     }
+
+    if (!finished)
+        finish();
 
     return all_->isComplete();
 }
 
-bool CudfAllToAll::insertTableToA2A(std::shared_ptr<cudf::table> table, int target, int ref) {
+bool CudfAllToAll::insertTableToA2A(std::shared_ptr<cudf::table_view> table, int target, int ref) {
     // construct header message to send
     // for all columns, send data-type, whether it has null data and offsets buffer.
     // header data
@@ -166,18 +172,22 @@ bool CudfAllToAll::insertTableToA2A(std::shared_ptr<cudf::table> table, int targ
     tableHeaders[0] = 0; // shows it is a table header. todo: make it enum
     tableHeaders[1] = ref;
     tableHeaders[2] = columns;
-    all_->insert(nullptr, 0, target, tableHeaders, headersLength);
+    bool accepted = all_->insert(nullptr, 0, target, tableHeaders, headersLength);
+    if (!accepted) {
+        LOG(ERROR) << myrank << ", header buffer not accepted to be sent";
+        return false;
+    }
 
     for (int i = 0; i < columns; ++i) {
-        insertColumnToA2A(table->get_column(i), i, target);
+        insertColumnToA2A(table->column(i), i, target);
     }
 
     return true;
 }
 
-bool CudfAllToAll::insertColumnToA2A(cudf::column &clmn, int columnIndex, int target) {
+bool CudfAllToAll::insertColumnToA2A(const cudf::column_view &cw, int columnIndex, int target) {
 
-    cudf::column_view cw = clmn.view();
+//    cudf::column_view cw = clmn.view();
     int headersLength = 6;
     int * columnHeaders = new int[headersLength];
     columnHeaders[0] = 1; // it is a column header. todo: make it enum
@@ -195,19 +205,29 @@ bool CudfAllToAll::insertColumnToA2A(cudf::column &clmn, int columnIndex, int ta
     else
         columnHeaders[4] = 1;
 
-    columnHeaders[5] = clmn.size();
+    columnHeaders[5] = cw.size();
 
     // send data
     const uint8_t *dataBuffer = cw.data<uint8_t>();
     int dataLen = dataLength(cw);
-    all_->insert(dataBuffer, dataLen, target, columnHeaders, headersLength);
+//    LOG(INFO) << myrank << "******* inserting column buffer with length: " << dataLen;
+    bool accepted = all_->insert(dataBuffer, dataLen, target, columnHeaders, headersLength);
+    if (!accepted) {
+        LOG(ERROR) << myrank << "******* data buffer not accepted to be sent";
+        return false;
+    }
 
     // send null buffer
     if (cw.nullable()) {
         uint8_t * nullBuffer = (uint8_t *)cw.null_mask();
         double dataTypeSize = data_type_size(cw);
         int nullBufSize = ceil(cw.size() / dataTypeSize);
-        all_->insert(nullBuffer, nullBufSize, target);
+//        LOG(INFO) << myrank << "******** inserting null buffer with length: " << nullBufSize;
+        accepted = all_->insert(nullBuffer, nullBufSize, target);
+        if (!accepted) {
+            LOG(ERROR) << myrank << ", nullable buffer not accepted to be sent";
+            return false;
+        }
     }
 
     return true;
@@ -272,29 +292,37 @@ std::shared_ptr<cudf::table> CudfAllToAll::constructTable(std::shared_ptr<Pendin
  * This function is called when a data is received
  */
 bool CudfAllToAll::onReceive(int source, std::shared_ptr<cylon::Buffer> buffer, int length) {
-  LOG(INFO) << "buffer received from the source: " << source;
+  LOG(INFO) << myrank << ",,,,, buffer received from the source: " << source << ", with length: " << length;
+  if (length == 0) {
+      return true;
+  }
   std::shared_ptr<CudfBuffer> cb = std::dynamic_pointer_cast<CudfBuffer>(buffer);
 
   // if the data buffer is not received yet, get it
   std::shared_ptr<PendingReceives> pr = receives_.at(source);
   if (!pr->dataBuffer) {
     pr->dataBuffer = cb->getBuf();
+    LOG(INFO) << myrank << ",,,,,, assigned data buffer";
 
     // if there is no null buffer or offset buffer, create the column
     if(!pr->hasNullBuffer) {
         constructColumn(pr);
+        LOG(INFO) << myrank << ",,,,,, constructed column";
     }
   } else if(!pr->hasNullBuffer) {
     pr->nullBuffer = cb->getBuf();
+    LOG(INFO) << myrank << ",,,,,,, assigned null buffer";
     // if there is no offset buffer, create the column
     constructColumn(pr);
+    LOG(INFO) << myrank << ",,,,,,, constructed column with null buffer";
   } else {
-      LOG(WARNING) << "although dataBuffer and nullBuffer have been received. a new buffer received from: " << source
+      LOG(WARNING) << myrank << ",,,,,, although dataBuffer and nullBuffer have been received. a new buffer received from: " << source
         << ", buffer length: " << length;
   }
 
   // if all columns are created, create the table
   if (pr->columns.size() == pr->numberOfColumns) {
+      LOG(INFO) << myrank << ", all columns are created. create the table.";
       std::shared_ptr<cudf::table> tbl = constructTable(pr);
       recv_callback_(source, tbl, pr->reference);
 
@@ -324,12 +352,13 @@ bool CudfAllToAll::onReceive(int source, std::shared_ptr<cylon::Buffer> buffer, 
  * Receive the header, this happens before we receive the actual data
  */
 bool CudfAllToAll::onReceiveHeader(int source, int finished, int *buffer, int length) {
+  LOG(INFO) << myrank << "----received a header buffer with length: " << length;
   if (length > 0) {
       if (buffer[0] == 0) { // table header
           std::shared_ptr<PendingReceives> pr = receives_.at(source);
           pr->reference = buffer[1];
           pr->numberOfColumns = buffer[2];
-          LOG(INFO) << "----received a table header from the source: " << source;
+          LOG(INFO) << myrank << "----received a table header from the source: " << source;
       } else if(buffer[0] == 1){ // column header
           std::shared_ptr<PendingReceives> pr = receives_.at(source);
           pr->columnIndex = buffer[1];
@@ -337,9 +366,9 @@ bool CudfAllToAll::onReceiveHeader(int source, int finished, int *buffer, int le
           pr->hasNullBuffer = buffer[3] == 0 ? false: true;
           pr->hasOffsetBuffer = buffer[4] == 0 ? false: true;
           pr->dataSize = buffer[5];
+          LOG(INFO) << myrank << "----received a column header from the source: " << source;
       }
   }
-  LOG(INFO) << "----received a header buffer with length: " << length;
   return true;
 }
 
@@ -348,7 +377,7 @@ bool CudfAllToAll::onReceiveHeader(int source, int finished, int *buffer, int le
  * @return
  */
 bool CudfAllToAll::onSendComplete(int target, const void *buffer, int length) {
-//        LOG(INFO) << "called onSendComplete with length: " << length << " for the target: " << target;
+  LOG(INFO) << myrank << ", SendComplete with length: " << length << " for the target: " << target;
   return true;
 }
 
@@ -422,7 +451,6 @@ int main(int argc, char *argv[]) {
     };
 
     CudfAllToAll * cA2A = new CudfAllToAll(ctx, allWorkers, allWorkers, 1, callback);
-    CudfAllocator * allocator = new CudfAllocator();
 
     // construct table
     std::string input_csv_file = argv[1];
@@ -433,10 +461,13 @@ int main(int argc, char *argv[]) {
 
 //    std::shared_ptr<cudf::table> tbl = std::make_shared<cudf::table>(ctable.tbl);
     for (int wID: allWorkers) {
-        cA2A->insert(std::move(ctable.tbl), wID);
+//        auto tbl = std::make_unique<cudf::table>(*(ctable.tbl));
+        std::shared_ptr<cudf::table_view> tv = std::make_shared<cudf::table_view> (ctable.tbl->view());
+        cA2A->insert(tv, wID);
     }
 
-    cA2A->finish();
+    LOG(INFO) << myrank << ", inserted tables: ";
+//    cA2A->finish();
 
     int i = 1;
     while(!cA2A->isComplete()) {

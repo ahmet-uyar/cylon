@@ -51,7 +51,7 @@ enum CudfHeader {
  */
 struct PendingSends {
     // pending tables to be sent with it's reference
-    std::queue<std::pair<std::shared_ptr<cudf::table>, int32_t>> tableQueue{};
+    std::queue<std::pair<std::shared_ptr<cudf::table_view>, int32_t>> tableQueue{};
 
     // state of the send
     CudfHeader status = CUDF_HEADER_INIT;
@@ -111,7 +111,7 @@ public:
    * @param target the target to send the table
    * @return true if the buffer is accepted
    */
-  int insert(const std::shared_ptr<cudf::table> &table, int32_t target);
+  int insert(const std::shared_ptr<cudf::table_view> &table, int32_t target);
 
   /**
    * Insert a table to be sent, if the table is accepted return true
@@ -121,7 +121,7 @@ public:
    * @param reference a reference that can be sent in the header
    * @return true if the buffer is accepted
    */
-  int insert(const std::shared_ptr<cudf::table> &arrow, int32_t target, int32_t reference);
+  int insert(const std::shared_ptr<cudf::table_view> &table, int32_t target, int32_t reference);
 
   /**
    * Check weather the operation is complete, this method needs to be called until the operation is complete
@@ -157,10 +157,15 @@ public:
   bool onSendComplete(int target, const void *buffer, int length) override;
 
 private:
-    bool insertTableToA2A(std::shared_ptr<cudf::table> table, int target, int ref);
-    bool insertColumnToA2A(cudf::column &clmn, int columnIndex, int target);
+    bool insertTableToA2A(std::shared_ptr<cudf::table_view> table, int target, int ref);
+    bool insertColumnToA2A(const cudf::column_view &cw, int columnIndex, int target);
     void constructColumn(std::shared_ptr<PendingReceives> pr);
     std::shared_ptr<cudf::table> constructTable(std::shared_ptr<PendingReceives> pr);
+
+    /**
+     * worker rank
+     */
+    int myrank;
 
     /**
      * The sources
