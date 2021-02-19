@@ -309,7 +309,7 @@ bool CudfAllToAll::onReceive(int source, std::shared_ptr<cylon::Buffer> buffer, 
         constructColumn(pr);
         LOG(INFO) << myrank << ",,,,,, constructed column";
     }
-  } else if(!pr->hasNullBuffer) {
+  } else if(pr->hasNullBuffer && !pr->nullBuffer) {
     pr->nullBuffer = cb->getBuf();
     LOG(INFO) << myrank << ",,,,,,, assigned null buffer";
     // if there is no offset buffer, create the column
