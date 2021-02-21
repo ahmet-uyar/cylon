@@ -101,5 +101,5 @@ macro(cylon_add_exe4 EXENAME)
     install(TARGETS ${EXENAME} RUNTIME DESTINATION examples)
 endmacro(cylon_add_exe4)
 
-cylon_add_exe4(mpi_cudf_test)
+cylon_add_exe4(cudf_test)
 cylon_add_exe4(cudf_a2a)

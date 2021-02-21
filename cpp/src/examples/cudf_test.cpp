@@ -60,6 +60,14 @@ void testEmptyLike(cudf::column_view const& input) {
     std::cout << "first data: " << hdata[0] << std::endl;
 }
 
+void childColumns(cudf::table_view tview) {
+
+    for (int i = 0; i < tview.num_columns(); ++i) {
+        cudf::column_view cw = tview.column(i);
+        std::cout << "column[" << i << "] children: " << cw.num_children() << std::endl;
+    }
+}
+
 int main(int argc, char** argv) {
     std::cout << "CUDF Example\n";
 
@@ -72,6 +80,10 @@ int main(int argc, char** argv) {
     cudf::io::csv_reader_options options = cudf::io::csv_reader_options::builder(si);
     cudf::io::table_with_metadata ctable = cudf::io::read_csv(options);
     std::cout << "number of columns: " << ctable.tbl->num_columns() << std::endl;
+
+    cudf::table_view tview = ctable.tbl->view();
+    childColumns(tview);
+    return 0;
 
     cudf::column column1 = ctable.tbl->get_column(0);
     std::cout << "column size: " << column1.size() << std::endl;

@@ -408,8 +408,7 @@ void testColumnAccess(cudf::column_view const& input) {
     uint8_t *hostArray= new uint8_t[dl];
     cudaMemcpy(hostArray, input.data<uint8_t>(), dl, cudaMemcpyDeviceToHost);
     int64_t * hdata = (int64_t *) hostArray;
-    std::cout << "first data: " << hdata[0] << std::endl;
-    LOG(INFO) << myrank << ": first 2 data: " << hdata[0] << ", " << hdata[1];
+    LOG(INFO) << myrank << "::::: first and last data: " << hdata[0] << ", " << hdata[input.size() -1];
 }
 
 void columnDataTypes(cudf::table * table) {
@@ -445,8 +444,9 @@ int main(int argc, char *argv[]) {
     cudaSetDevice(myrank % numberOfGPUs);
 
     // define call back to catch the receiving tables
-    CudfCallback callback = [=](int source, const std::shared_ptr<cudf::table> &table_, int reference) {
+    CudfCallback callback = [=](int source, const std::shared_ptr<cudf::table> &table, int reference) {
         LOG(INFO) << "received a table ...................)))))))))))))))))))))))))))";
+        testColumnAccess(table->view().column(0));
         return true;
     };
 
