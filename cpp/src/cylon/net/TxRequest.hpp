@@ -27,7 +27,7 @@ class TxRequest {
   int header[6] = {};
   int headerLength{};
 
-  TxRequest(int tgt, void *buf, int len);
+  TxRequest(int tgt, const void *buf, int len);
 
   TxRequest(int tgt, const void *buf, int len, int *head, int hLength);
 

@@ -24,7 +24,7 @@ cylon::TxRequest::TxRequest(int tgt) {
   target = tgt;
 }
 
-cylon::TxRequest::TxRequest(int tgt, void *buf, int len) {
+cylon::TxRequest::TxRequest(int tgt, const void *buf, int len) {
   target = tgt;
   buffer = buf;
   length = len;
