@@ -74,6 +74,8 @@ struct PendingReceives {
 
     // number of data elements
     int dataSize{};
+    // length of the data buffer
+    int dataBufferLen{};
 
 
     // data buffer for the current column

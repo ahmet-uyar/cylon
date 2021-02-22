@@ -20,6 +20,8 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/column/column.hpp>
+#include <cudf/strings/strings_column_view.hpp>
+
 #include <cuda_runtime.h>
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/detail/error.hpp>
@@ -165,8 +167,7 @@ bool CudfAllToAll::insertTableToA2A(std::shared_ptr<cudf::table_view> table, int
     // construct header message to send
     // for all columns, send data-type, whether it has null data and offsets buffer.
     // header data
-//    int columns = table->num_columns();
-    int columns = 2;
+    int columns = table->num_columns();
     int headersLength = 3;
     int * tableHeaders = new int[headersLength];
     tableHeaders[0] = 0; // shows it is a table header. todo: make it enum
@@ -187,31 +188,45 @@ bool CudfAllToAll::insertTableToA2A(std::shared_ptr<cudf::table_view> table, int
 
 bool CudfAllToAll::insertColumnToA2A(const cudf::column_view &cw, int columnIndex, int target) {
 
-//    cudf::column_view cw = clmn.view();
+    // we support uniform size data types and the string type
+    if (!uniform_size_data(cw) && cw.type().id() != cudf::type_id::STRING) {
+        throw "only uniform-size data-types and the string is supported.";
+    }
+
     int headersLength = 6;
     int * columnHeaders = new int[headersLength];
     columnHeaders[0] = 1; // it is a column header. todo: make it enum
     columnHeaders[1] = columnIndex;
     columnHeaders[2] = (int)(cw.type().id()); // data-type of the column
     // whether the column has null array, 1 has the null buffer, 0 means no null buffer
-    if (cw.nullable())
-        columnHeaders[3] = 1;
-    else
-        columnHeaders[3] = 0;
-
+    columnHeaders[3] = cw.nullable() ? 1 : 0;
     //whether the column has offsets array
-    if (uniform_size_data(cw))
-        columnHeaders[4] = 0;
-    else
-        columnHeaders[4] = 1;
-
+    columnHeaders[4] = (cw.num_children() > 0) ? 1 : 0;
+    // number of elements in the column
     columnHeaders[5] = cw.size();
 
-    // send data
-    const uint8_t *dataBuffer = cw.data<uint8_t>();
-    int dataLen = dataLength(cw);
+    // insert data buffer
+    const uint8_t *dataBuffer;
+    int bufferSize;
+
+    // if it is a string column, get char buffer
+    const uint8_t *offsetsBuffer;
+    int offsetsSize = -1;
+    if (cw.type().id() != cudf::type_id::STRING) {
+        cudf::strings_column_view scv(cw);
+        dataBuffer = scv.chars().data<uint8_t>();
+        bufferSize = scv.chars_size();
+
+        offsetsBuffer = scv.offsets().data<uint8_t>();
+        offsetsSize = dataLength(scv.offsets());
+    // get uniform size column data
+    } else {
+        dataBuffer = cw.data<uint8_t>();
+        bufferSize = dataLength(cw);
 //    LOG(INFO) << myrank << "******* inserting column buffer with length: " << dataLen;
-    bool accepted = all_->insert(dataBuffer, dataLen, target, columnHeaders, headersLength);
+    }
+    // insert the buffer
+    bool accepted = all_->insert(dataBuffer, bufferSize, target, columnHeaders, headersLength);
     if (!accepted) {
         LOG(ERROR) << myrank << "******* data buffer not accepted to be sent";
         return false;
@@ -220,12 +235,19 @@ bool CudfAllToAll::insertColumnToA2A(const cudf::column_view &cw, int columnInde
     // send null buffer
     if (cw.nullable()) {
         uint8_t * nullBuffer = (uint8_t *)cw.null_mask();
-        double dataTypeSize = data_type_size(cw);
-        int nullBufSize = ceil(cw.size() / dataTypeSize);
+        std::size_t nullBufSize = cudf::bitmask_allocation_size_bytes(cw.size());
 //        LOG(INFO) << myrank << "******** inserting null buffer with length: " << nullBufSize;
         accepted = all_->insert(nullBuffer, nullBufSize, target);
         if (!accepted) {
             LOG(ERROR) << myrank << ", nullable buffer not accepted to be sent";
+            return false;
+        }
+    }
+
+    if (offsetsBuffer) {
+        accepted = all_->insert(offsetsBuffer, offsetsSize, target);
+        if (!accepted) {
+            LOG(ERROR) << myrank << ", offsets buffer not accepted to be sent";
             return false;
         }
     }
@@ -254,12 +276,34 @@ void CudfAllToAll::constructColumn(std::shared_ptr<PendingReceives> pr) {
     cudf::data_type dt(static_cast<cudf::type_id>(pr->columnDataType));
     std::shared_ptr<rmm::device_buffer> dataBuffer = pr->dataBuffer;
     std::shared_ptr<rmm::device_buffer> nullBuffer = pr->nullBuffer;
+    std::shared_ptr<rmm::device_buffer> offsetsBuffer = pr->offsetsBuffer;
 
-    // if there is no null buffer or offset buffer, create the column with data only
-    if(!pr->hasNullBuffer) {
-        column = std::make_unique<cudf::column>(dt, pr->dataSize, *dataBuffer);
-    } else { //todo: handle offsets
-        column = std::make_unique<cudf::column>(dt, pr->dataSize, *dataBuffer, *nullBuffer);
+    if (dt.id() != cudf::type_id::STRING)  {
+        // if there is no null buffer or offset buffer, create the column with data only
+        if(!pr->hasNullBuffer) {
+            column = std::make_unique<cudf::column>(dt, pr->dataSize, *dataBuffer);
+        } else { //todo: handle offsets
+            column = std::make_unique<cudf::column>(dt, pr->dataSize, *dataBuffer, *nullBuffer);
+        }
+
+    // construct string column
+    } else {
+        // construct chars child column
+        auto cdt = cudf::data_type{cudf::type_id::INT8};
+        auto charsColumn = std::make_unique<cudf::column>(cdt, pr->dataBufferLen, *dataBuffer);
+        auto odt = cudf::data_type{cudf::type_id::INT32};
+        auto offsetsColumn = std::make_unique<cudf::column>(odt, pr->dataSize + 1, *offsetsBuffer);
+
+        std::vector<std::unique_ptr<cudf::column>> children;
+        children.emplace_back(std::move(offsetsColumn));
+        children.emplace_back(std::move(charsColumn));
+
+        column = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::STRING},
+                                 pr->dataSize,
+                                 rmm::device_buffer{0},
+                                 *nullBuffer,
+                                 cudf::UNKNOWN_NULL_COUNT,
+                                 std::move(children));
     }
 
     // if the column is constructed, add it to the list
@@ -272,7 +316,10 @@ void CudfAllToAll::constructColumn(std::shared_ptr<PendingReceives> pr) {
         pr->dataSize = -1;
         pr->dataBuffer.reset();
         pr->nullBuffer.reset();
+        pr->offsetsBuffer.reset();
         pr->hasNullBuffer = false;
+        pr->hasOffsetBuffer = false;
+        pr->dataBufferLen = -1;
     }
 
 }
@@ -302,22 +349,30 @@ bool CudfAllToAll::onReceive(int source, std::shared_ptr<cylon::Buffer> buffer, 
   std::shared_ptr<PendingReceives> pr = receives_.at(source);
   if (!pr->dataBuffer) {
     pr->dataBuffer = cb->getBuf();
+    pr->dataBufferLen = length;
     LOG(INFO) << myrank << ",,,,,, assigned data buffer";
 
     // if there is no null buffer or offset buffer, create the column
-    if(!pr->hasNullBuffer) {
+    if(!pr->hasNullBuffer && !pr->hasOffsetBuffer) {
         constructColumn(pr);
         LOG(INFO) << myrank << ",,,,,, constructed column";
     }
   } else if(pr->hasNullBuffer && !pr->nullBuffer) {
-    pr->nullBuffer = cb->getBuf();
-    LOG(INFO) << myrank << ",,,,,,, assigned null buffer";
-    // if there is no offset buffer, create the column
-    constructColumn(pr);
-    LOG(INFO) << myrank << ",,,,,,, constructed column with null buffer";
+      pr->nullBuffer = cb->getBuf();
+      LOG(INFO) << myrank << ",,,,,,, assigned null buffer";
+      // if there is no offset buffer, create the column
+      if (!pr->hasOffsetBuffer) {
+          constructColumn(pr);
+          LOG(INFO) << myrank << ",,,,,,, constructed column with null buffer";
+      }
+  } else if(pr->hasOffsetBuffer && !pr->offsetsBuffer) {
+      pr->offsetsBuffer = cb->getBuf();
+      LOG(INFO) << myrank << ",,,,,,, assigned offset buffer";
+      constructColumn(pr);
+      LOG(INFO) << myrank << ",,,,,,, constructed column with offset buffer";
+
   } else {
-      LOG(WARNING) << myrank << ",,,,,, although dataBuffer and nullBuffer have been received. a new buffer received from: " << source
-        << ", buffer length: " << length;
+      LOG(WARNING) << myrank << ",,,,,, an unexpected buffer received from: " << source << ", buffer length: " << length;
   }
 
   // if all columns are created, create the table
@@ -331,19 +386,6 @@ bool CudfAllToAll::onReceive(int source, std::shared_ptr<cylon::Buffer> buffer, 
       pr->numberOfColumns = -1;
       pr->reference = -1;
   }
-
-//  uint8_t *hostArray= new uint8_t[length];
-//  cudaMemcpy(hostArray, cb->GetByteBuffer(), length, cudaMemcpyDeviceToHost);
-//
-//  if (data_types.at(source) == 3) {
-//    int32_t * hdata = (int32_t *) hostArray;
-//    LOG(INFO) << "==== data[0]: " << hdata[0] << ", data[1]: " << hdata[1];
-//  } else if (data_types.at(source) == 4) {
-//    int64_t *hdata = (int64_t *) hostArray;
-//    LOG(INFO) << "==== data[0]: " << hdata[0] << ", data[1]: " << hdata[1];
-//  } else {
-//    LOG(WARNING) << "Unrecognized data type ==== : " << data_types.at(source);
-//  }
 
   return true;
 }
