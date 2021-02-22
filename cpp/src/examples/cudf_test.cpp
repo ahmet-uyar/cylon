@@ -8,6 +8,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/column/column.hpp>
+#include <cudf/strings/strings_column_view.hpp>
 #include <cuda_runtime.h>
 
 #include <rmm/cuda_stream_view.hpp>
@@ -15,6 +16,15 @@
 // sizes of cudf types in tables
 // ref: type_id in cudf/types.hpp
 int type_bytes[] = {0, 1, 2, 4, 8, 1, 2, 4, 8, 4, 8, 1, 4, 8, 8, 8, 8, 4, 8, 8, 8, 8, -1, -1, -1, 4, 8, -1, -1};
+
+/**
+ * whether the data type is uniform in size such as int (4 bytes) or string(variable length)
+ * @param input
+ * @return
+ */
+int data_type_size(cudf::column_view const& cw){
+    return type_bytes[static_cast<int>(cw.type().id())];
+}
 
 /**
  * data buffer length of a column in bytes
@@ -60,11 +70,40 @@ void testEmptyLike(cudf::column_view const& input) {
     std::cout << "first data: " << hdata[0] << std::endl;
 }
 
-void childColumns(cudf::table_view tview) {
+void printCharArray(cudf::column_view cv, int charSize) {
+    char *hostArray= new char[charSize+1];
+    cudaMemcpy(hostArray, cv.data<char>(), charSize, cudaMemcpyDeviceToHost);
+    hostArray[charSize] = '\0';
+    std::cout << "chars:: " << hostArray << std::endl;
+}
+
+void printOffsetsArray(cudf::column_view cv) {
+    std::cout << "offsets column size: " << cv.size() << ", type: " << static_cast<int>(cv.type().id()) << std::endl;
+    uint8_t *hostArray= new uint8_t[dataLength(cv)];
+    cudaMemcpy(hostArray, cv.data<uint8_t>(), dataLength(cv), cudaMemcpyDeviceToHost);
+    int32_t * hdata = (int32_t *) hostArray;
+    for (int i = 0; i < cv.size(); ++i) {
+        std::cout << hdata[i] << ", ";
+    }
+    std::cout << std::endl;
+}
+
+void printChildColumns(cudf::table_view tview) {
 
     for (int i = 0; i < tview.num_columns(); ++i) {
         cudf::column_view cw = tview.column(i);
         std::cout << "column[" << i << "] children: " << cw.num_children() << std::endl;
+        if (cw.type().id() == cudf::type_id::STRING) {
+            std::cout << "column type is STRING ------------------------------------------------ " << std::endl;
+            cudf::strings_column_view scv(cw);
+            std::cout << "number of strings: " << scv.size() << std::endl;
+            std::cout << "number of nulls: " << scv.null_count() << std::endl;
+            std::cout << "offsets_column_index: " << scv.offsets_column_index << std::endl;
+            std::cout << "chars_column_index: " << scv.chars_column_index << std::endl;
+            std::cout << "chars_size: " << scv.chars_size() << std::endl;
+            printCharArray(scv.chars(), scv.chars_size());
+            printOffsetsArray(scv.offsets(), scv.size());
+        }
     }
 }
 
@@ -82,7 +121,7 @@ int main(int argc, char** argv) {
     std::cout << "number of columns: " << ctable.tbl->num_columns() << std::endl;
 
     cudf::table_view tview = ctable.tbl->view();
-    childColumns(tview);
+    printChildColumns(tview);
     return 0;
 
     cudf::column column1 = ctable.tbl->get_column(0);
