@@ -1,5 +1,6 @@
 #include <iostream>
 #include <cmath>
+#include <bitset>
 
 #include <cudf/types.hpp>
 #include <cudf/copying.hpp>
@@ -9,8 +10,9 @@
 #include <cudf/table/table.hpp>
 #include <cudf/column/column.hpp>
 #include <cudf/strings/strings_column_view.hpp>
-#include <cuda_runtime.h>
+#include <cudf/null_mask.hpp>
 
+#include <cuda_runtime.h>
 #include <rmm/cuda_stream_view.hpp>
 
 // sizes of cudf types in tables
@@ -88,11 +90,29 @@ void printOffsetsArray(cudf::column_view cv) {
     std::cout << std::endl;
 }
 
+void printNullMask(cudf::column_view cv) {
+    if (!cv.nullable()) {
+        std::cout << "the column is not nullable ......................: " << std::endl;
+        return;
+    }
+    std::cout << "number of nulls in the column: " << cv.null_count() << std::endl;
+    std::cout << "offset for the first element in the column: " << cv.offset() << std::endl;
+    std::size_t size = cudf::bitmask_allocation_size_bytes(cv.size());
+    uint8_t *hostArray= new uint8_t[size];
+    cudaMemcpy(hostArray, (uint8_t *)cv.null_mask(), size, cudaMemcpyDeviceToHost);
+    for (int i = 0; i < size; ++i) {
+        std::bitset<8> x(hostArray[i]);
+        std::cout << i << ":" << x << " ";
+    }
+    std::cout << std::endl;
+}
+
 void printChildColumns(cudf::table_view tview) {
 
     for (int i = 0; i < tview.num_columns(); ++i) {
         cudf::column_view cw = tview.column(i);
         std::cout << "column[" << i << "] children: " << cw.num_children() << std::endl;
+        printNullMask(cw);
         if (cw.type().id() == cudf::type_id::STRING) {
             std::cout << "column type is STRING ------------------------------------------------ " << std::endl;
             cudf::strings_column_view scv(cw);
@@ -102,7 +122,7 @@ void printChildColumns(cudf::table_view tview) {
             std::cout << "chars_column_index: " << scv.chars_column_index << std::endl;
             std::cout << "chars_size: " << scv.chars_size() << std::endl;
             printCharArray(scv.chars(), scv.chars_size());
-            printOffsetsArray(scv.offsets(), scv.size());
+            printOffsetsArray(scv.offsets());
         }
     }
 }
