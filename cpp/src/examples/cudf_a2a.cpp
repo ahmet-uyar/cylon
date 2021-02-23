@@ -501,7 +501,12 @@ int main(int argc, char *argv[]) {
     // define call back to catch the receiving tables
     CudfCallback callback = [=](int source, const std::shared_ptr<cudf::table> &table, int reference) {
         LOG(INFO) << "received a table ...................)))))))))))))))))))))))))))";
-        testColumnAccess(table->view().column(0));
+        cudf::table_view tv = table->view();
+        for (int i = 0; i < tv.num_columns(); ++i) {
+            if (tv.column(i).type().id() != cudf::type_id::STRING) {
+                testColumnAccess(tv.column(i));
+            }
+        }
         return true;
     };
 
