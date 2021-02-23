@@ -169,7 +169,7 @@ bool CudfAllToAll::insertTableToA2A(std::shared_ptr<cudf::table_view> table, int
     // header data
     int columns = table->num_columns();
     int headersLength = 3;
-    int * tableHeaders = new int[headersLength];
+    int tableHeaders[headersLength];
     tableHeaders[0] = 0; // shows it is a table header. todo: make it enum
     tableHeaders[1] = ref;
     tableHeaders[2] = columns;
@@ -194,7 +194,7 @@ bool CudfAllToAll::insertColumnToA2A(const cudf::column_view &cw, int columnInde
     }
 
     int headersLength = 6;
-    int * columnHeaders = new int[headersLength];
+    int columnHeaders[headersLength];
     columnHeaders[0] = 1; // it is a column header. todo: make it enum
     columnHeaders[1] = columnIndex;
     columnHeaders[2] = (int)(cw.type().id()); // data-type of the column
