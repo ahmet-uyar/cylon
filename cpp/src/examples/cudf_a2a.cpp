@@ -212,7 +212,7 @@ bool CudfAllToAll::insertColumnToA2A(const cudf::column_view &cw, int columnInde
     // if it is a string column, get char buffer
     const uint8_t *offsetsBuffer;
     int offsetsSize = -1;
-    if (cw.type().id() != cudf::type_id::STRING) {
+    if (cw.type().id() == cudf::type_id::STRING) {
         cudf::strings_column_view scv(cw);
         dataBuffer = scv.chars().data<uint8_t>();
         bufferSize = scv.chars_size();
@@ -279,11 +279,10 @@ void CudfAllToAll::constructColumn(std::shared_ptr<PendingReceives> pr) {
     std::shared_ptr<rmm::device_buffer> offsetsBuffer = pr->offsetsBuffer;
 
     if (dt.id() != cudf::type_id::STRING)  {
-        // if there is no null buffer or offset buffer, create the column with data only
-        if(!pr->hasNullBuffer) {
-            column = std::make_unique<cudf::column>(dt, pr->dataSize, *dataBuffer);
-        } else { //todo: handle offsets
+        if(pr->hasNullBuffer) {
             column = std::make_unique<cudf::column>(dt, pr->dataSize, *dataBuffer, *nullBuffer);
+        } else {
+            column = std::make_unique<cudf::column>(dt, pr->dataSize, *dataBuffer);
         }
 
     // construct string column
@@ -298,12 +297,22 @@ void CudfAllToAll::constructColumn(std::shared_ptr<PendingReceives> pr) {
         children.emplace_back(std::move(offsetsColumn));
         children.emplace_back(std::move(charsColumn));
 
-        column = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::STRING},
-                                 pr->dataSize,
-                                 rmm::device_buffer{0},
-                                 *nullBuffer,
-                                 cudf::UNKNOWN_NULL_COUNT,
-                                 std::move(children));
+        if (pr->hasNullBuffer) {
+            column = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::STRING},
+                                                    pr->dataSize,
+                                                    rmm::device_buffer{0},
+                                                    *nullBuffer,
+                                                    cudf::UNKNOWN_NULL_COUNT,
+                                                    std::move(children));
+        } else{
+            column = std::make_unique<cudf::column>(cudf::data_type{cudf::type_id::STRING},
+                                                    pr->dataSize,
+                                                    rmm::device_buffer{0},
+                                                    rmm::device_buffer{0},
+                                                    0,
+                                                    std::move(children));
+        }
+
     }
 
     // if the column is constructed, add it to the list
@@ -313,15 +322,14 @@ void CudfAllToAll::constructColumn(std::shared_ptr<PendingReceives> pr) {
         // clear column related data from pr
         pr->columnIndex = -1;
         pr->columnDataType = -1;
-        pr->dataSize = -1;
+        pr->dataSize = 0;
         pr->dataBuffer.reset();
         pr->nullBuffer.reset();
         pr->offsetsBuffer.reset();
         pr->hasNullBuffer = false;
         pr->hasOffsetBuffer = false;
-        pr->dataBufferLen = -1;
+        pr->dataBufferLen = 0;
     }
-
 }
 
 std::shared_ptr<cudf::table> CudfAllToAll::constructTable(std::shared_ptr<PendingReceives> pr) {
@@ -350,34 +358,34 @@ bool CudfAllToAll::onReceive(int source, std::shared_ptr<cylon::Buffer> buffer, 
   if (!pr->dataBuffer) {
     pr->dataBuffer = cb->getBuf();
     pr->dataBufferLen = length;
-    LOG(INFO) << myrank << ",,,,,, assigned data buffer";
+    LOG(INFO) << myrank <<  " ##### "<< pr->columnIndex << " assigned data buffer";
 
     // if there is no null buffer or offset buffer, create the column
     if(!pr->hasNullBuffer && !pr->hasOffsetBuffer) {
         constructColumn(pr);
-        LOG(INFO) << myrank << ",,,,,, constructed column";
+        LOG(INFO) << myrank <<  " ##### "<< pr->columnIndex << " constructed column";
     }
   } else if(pr->hasNullBuffer && !pr->nullBuffer) {
       pr->nullBuffer = cb->getBuf();
-      LOG(INFO) << myrank << ",,,,,,, assigned null buffer";
+      LOG(INFO) << myrank <<  " ##### "<< pr->columnIndex << " assigned null buffer";
       // if there is no offset buffer, create the column
       if (!pr->hasOffsetBuffer) {
           constructColumn(pr);
-          LOG(INFO) << myrank << ",,,,,,, constructed column with null buffer";
+          LOG(INFO) << myrank <<  " ##### "<< pr->columnIndex << " constructed column with null buffer";
       }
   } else if(pr->hasOffsetBuffer && !pr->offsetsBuffer) {
       pr->offsetsBuffer = cb->getBuf();
-      LOG(INFO) << myrank << ",,,,,,, assigned offset buffer";
+      LOG(INFO) << myrank <<  " ##### "<< pr->columnIndex << " assigned offset buffer";
       constructColumn(pr);
-      LOG(INFO) << myrank << ",,,,,,, constructed column with offset buffer";
+      LOG(INFO) << myrank <<  " ##### "<< pr->columnIndex << " constructed column with offset buffer";
 
   } else {
-      LOG(WARNING) << myrank << ",,,,,, an unexpected buffer received from: " << source << ", buffer length: " << length;
+      LOG(INFO) << myrank <<  " ##### "<< pr->columnIndex << " an unexpected buffer received from: " << source << ", buffer length: " << length;
   }
 
   // if all columns are created, create the table
   if (pr->columns.size() == pr->numberOfColumns) {
-      LOG(INFO) << myrank << ", all columns are created. create the table.";
+      LOG(INFO) << myrank << "***** all columns are created. create the table.";
       std::shared_ptr<cudf::table> tbl = constructTable(pr);
       recv_callback_(source, tbl, pr->reference);
 
@@ -408,7 +416,12 @@ bool CudfAllToAll::onReceiveHeader(int source, int finished, int *buffer, int le
           pr->hasNullBuffer = buffer[3] == 0 ? false: true;
           pr->hasOffsetBuffer = buffer[4] == 0 ? false: true;
           pr->dataSize = buffer[5];
-          LOG(INFO) << myrank << "----received a column header from the source: " << source;
+          LOG(INFO) << myrank << "----received a column header from the source: " << source
+                  << ", columnIndex: " << pr->columnIndex << std::endl
+                  << ", columnDataType: " << pr->columnDataType << std::endl
+                  << ", hasNullBuffer: " << pr->hasNullBuffer << std::endl
+                  << ", hasOffsetBuffer: " << pr->hasOffsetBuffer << std::endl
+                  << ", dataSize: " << pr->dataSize << std::endl;
       }
   }
   return true;

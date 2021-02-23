@@ -58,24 +58,27 @@ struct PendingSends {
 };
 
 struct PendingReceives {
+    // table variables
+    // currently received columns
+    std::unordered_map<int, std::unique_ptr<cudf::column>> columns;
     // number of columns in the table
-    int numberOfColumns{};
+    int numberOfColumns{-1};
     // the reference
-    int reference{};
+    int reference{-1};
 
+    // column variables
     // data type of the column
-    int columnDataType{};
+    int columnDataType{-1};
     // the current data column index
-    int columnIndex{};
+    int columnIndex{-1};
     // whether the current column has the null buffer
-    bool hasNullBuffer{};
+    bool hasNullBuffer{false};
     // whether the current column has the offset buffer
-    bool hasOffsetBuffer{};
-
+    bool hasOffsetBuffer{false};
     // number of data elements
-    int dataSize{};
+    int dataSize{0};
     // length of the data buffer
-    int dataBufferLen{};
+    int dataBufferLen{0};
 
 
     // data buffer for the current column
@@ -84,8 +87,6 @@ struct PendingReceives {
     std::shared_ptr<rmm::device_buffer> nullBuffer;
     // offsets buffer for the current column
     std::shared_ptr<rmm::device_buffer> offsetsBuffer;
-    // currently received columns
-    std::unordered_map<int, std::unique_ptr<cudf::column>> columns;
 };
 
 /**
