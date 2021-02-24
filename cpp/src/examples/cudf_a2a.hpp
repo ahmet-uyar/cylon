@@ -186,9 +186,8 @@ private:
                            int target,
                            std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue);
 
-    bool insertTableToA2A(std::shared_ptr<cudf::table_view> table, int target, int ref);
-    bool insertColumnToA2A(const cudf::column_view &cw, int columnIndex, int target);
     void constructColumn(std::shared_ptr<PendingReceives> pr);
+
     std::shared_ptr<cudf::table> constructTable(std::shared_ptr<PendingReceives> pr);
 
     /**

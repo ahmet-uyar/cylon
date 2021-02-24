@@ -196,26 +196,26 @@ int CudfAllToAll::insert(const std::shared_ptr<cudf::table_view> &table,
 
 bool CudfAllToAll::isComplete() {
 
-    for (const auto &t : inputs_) {
+    for (const auto &pendingSend : inputs_) {
         // if the buffer queue is not empty, first insert those buffers
-        if (!t.second->bufferQueue.empty()) {
-            bool inserted = insertBuffers(t.second->bufferQueue);
+        if (!pendingSend.second->bufferQueue.empty()) {
+            bool inserted = insertBuffers(pendingSend.second->bufferQueue);
             if (!inserted) {
                 return false;
             }
         }
 
-        while (!t.second->tableQueue.empty()) {
-          std::pair<std::shared_ptr<cudf::table_view>, int32_t> currentPair = t.second->tableQueue.front();
-          t.second->tableQueue.pop();
-          makeTableBuffers(currentPair.first, t.first, currentPair.second, t.second->bufferQueue);
-          bool inserted = insertBuffers(t.second->bufferQueue);
+        while (!pendingSend.second->tableQueue.empty()) {
+          auto currentPair = pendingSend.second->tableQueue.front();
+          pendingSend.second->tableQueue.pop();
+          makeTableBuffers(currentPair.first, pendingSend.first, currentPair.second, pendingSend.second->bufferQueue);
+          bool inserted = insertBuffers(pendingSend.second->bufferQueue);
           if (!inserted) {
               return false;
           }
 
 //          insertTableToA2A(currentPair.first, t.first, currentPair.second);
-          LOG(INFO) << myrank << ", inserted table for A2A. target: " << t.first << ", ref: " << currentPair.second;
+          LOG(INFO) << myrank << ", inserted table for A2A. target: " << pendingSend.first << ", ref: " << currentPair.second;
         }
     }
 
@@ -325,103 +325,6 @@ void CudfAllToAll::makeColumnBuffers(const cudf::column_view &cw,
         pb = std::make_shared<PendingBuffer>(offsetsBuffer, offsetsSize, target);
         bufferQueue.emplace(pb);
     }
-}
-
-bool CudfAllToAll::insertTableToA2A(std::shared_ptr<cudf::table_view> table, int target, int ref) {
-    // construct header message to send
-    // for all columns, send data-type, whether it has null data and offsets buffer.
-    // header data
-    int columns = table->num_columns();
-    int headersLength = 3;
-    int tableHeaders[headersLength];
-    tableHeaders[0] = 0; // shows it is a table header. todo: make it enum
-    tableHeaders[1] = ref;
-    tableHeaders[2] = columns;
-    bool accepted = all_->insert(nullptr, 0, target, tableHeaders, headersLength);
-    if (!accepted) {
-        LOG(ERROR) << myrank << " ******* header buffer not accepted to be sent";
-        return false;
-    }
-
-    for (int i = 0; i < columns; ++i) {
-        insertColumnToA2A(table->column(i), i, target);
-    }
-
-    return true;
-}
-
-bool CudfAllToAll::insertColumnToA2A(const cudf::column_view &cw, int columnIndex, int target) {
-
-    // we support uniform size data types and the string type
-    if (!uniform_size_data(cw) && cw.type().id() != cudf::type_id::STRING) {
-        throw "only uniform-size data-types and the string is supported.";
-    }
-
-    int headersLength = 6;
-    int columnHeaders[headersLength];
-    columnHeaders[0] = 1; // it is a column header.
-    columnHeaders[1] = columnIndex;
-    columnHeaders[2] = (int)(cw.type().id()); // data-type of the column
-    // whether the column has null array, 1 has the null buffer, 0 means no null buffer
-    columnHeaders[3] = cw.nullable() ? 1 : 0;
-    //whether the column has offsets array
-    columnHeaders[4] = (cw.num_children() > 0) ? 1 : 0;
-    // number of elements in the column
-    columnHeaders[5] = cw.size();
-
-    // insert data buffer
-    const uint8_t *dataBuffer;
-    int bufferSize;
-
-    // if it is a string column, get char buffer
-    const uint8_t *offsetsBuffer;
-    int offsetsSize = -1;
-    if (cw.type().id() == cudf::type_id::STRING) {
-        cudf::strings_column_view scv(cw);
-        dataBuffer = scv.chars().data<uint8_t>();
-        bufferSize = scv.chars_size();
-
-        offsetsBuffer = scv.offsets().data<uint8_t>();
-        offsetsSize = dataLength(scv.offsets());
-    // get uniform size column data
-    } else {
-        dataBuffer = cw.data<uint8_t>();
-        bufferSize = dataLength(cw);
-//    LOG(INFO) << myrank << "******* inserting column buffer with length: " << dataLen;
-    }
-    // insert the data buffer
-    if(bufferSize < 0) {
-        LOG(ERROR) << myrank << " ******* bufferSize: " << bufferSize;
-    }
-    bool accepted = all_->insert(dataBuffer, bufferSize, target, columnHeaders, headersLength);
-    if (!accepted) {
-        LOG(ERROR) << myrank << " ******* data buffer not accepted to be sent";
-        return false;
-    }
-
-    // insert null buffer if exists
-    if (cw.nullable()) {
-        uint8_t * nullBuffer = (uint8_t *)cw.null_mask();
-        std::size_t nullBufSize = cudf::bitmask_allocation_size_bytes(cw.size());
-        if(nullBufSize < 0) {
-            LOG(ERROR) << myrank << " ******* nullBufSize: " << nullBufSize;
-        }
-        accepted = all_->insert(nullBuffer, nullBufSize, target);
-        if (!accepted) {
-            LOG(ERROR) << myrank << " ******* nullable buffer not accepted to be sent";
-            return false;
-        }
-    }
-
-    if (offsetsSize >= 0) {
-        accepted = all_->insert(offsetsBuffer, offsetsSize, target);
-        if (!accepted) {
-            LOG(ERROR) << myrank << " ******* offsets buffer not accepted to be sent";
-            return false;
-        }
-    }
-
-    return true;
 }
 
 void CudfAllToAll::finish() {
