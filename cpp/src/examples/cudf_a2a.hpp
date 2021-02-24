@@ -38,12 +38,26 @@ public:
     cylon::Status Allocate(int64_t length, std::shared_ptr<cylon::Buffer> *buffer) override;
 };
 
-enum CudfHeader {
-    CUDF_HEADER_INIT = 0,
-    // wea are still sending the data about the column
-    CUDF_HEADER_COLUMN_CONTINUE = 1,
-    // this is the end of the column
-    CUDF_HEADER_COLUMN_END = 2
+class PendingBuffer {
+public:
+    explicit PendingBuffer(const uint8_t *buffer,
+                           int bufferSize,
+                           int target,
+                           std::unique_ptr<int []> headers = nullptr,
+                           int headersLength = -1);
+
+    explicit PendingBuffer(int target,
+                           std::unique_ptr<int []> headers,
+                           int headersLength);
+
+    bool sendBuffer(std::shared_ptr<cylon::AllToAll> all);
+
+private:
+    const uint8_t *buffer;
+    int bufferSize;
+    int target;
+    std::unique_ptr<int []> headers;
+    int headersLength;
 };
 
 /**
@@ -53,8 +67,8 @@ struct PendingSends {
     // pending tables to be sent with it's reference
     std::queue<std::pair<std::shared_ptr<cudf::table_view>, int32_t>> tableQueue{};
 
-    // state of the send
-    CudfHeader status = CUDF_HEADER_INIT;
+    // buffers to send from the current table
+    std::queue<std::shared_ptr<PendingBuffer>> bufferQueue{};
 };
 
 struct PendingReceives {
@@ -160,6 +174,18 @@ public:
   bool onSendComplete(int target, const void *buffer, int length) override;
 
 private:
+    bool insertBuffers(std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue);
+
+    void makeTableBuffers(std::shared_ptr<cudf::table_view> table,
+                          int target,
+                          int ref,
+                          std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue);
+
+    void makeColumnBuffers(const cudf::column_view &cw,
+                           int columnIndex,
+                           int target,
+                           std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue);
+
     bool insertTableToA2A(std::shared_ptr<cudf::table_view> table, int target, int ref);
     bool insertColumnToA2A(const cudf::column_view &cw, int columnIndex, int target);
     void constructColumn(std::shared_ptr<PendingReceives> pr);
