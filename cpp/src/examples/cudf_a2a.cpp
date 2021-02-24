@@ -175,7 +175,7 @@ bool CudfAllToAll::insertTableToA2A(std::shared_ptr<cudf::table_view> table, int
     tableHeaders[2] = columns;
     bool accepted = all_->insert(nullptr, 0, target, tableHeaders, headersLength);
     if (!accepted) {
-        LOG(ERROR) << myrank << ", header buffer not accepted to be sent";
+        LOG(ERROR) << myrank << " ******* header buffer not accepted to be sent";
         return false;
     }
 
@@ -195,7 +195,7 @@ bool CudfAllToAll::insertColumnToA2A(const cudf::column_view &cw, int columnInde
 
     int headersLength = 6;
     int columnHeaders[headersLength];
-    columnHeaders[0] = 1; // it is a column header. todo: make it enum
+    columnHeaders[0] = 1; // it is a column header.
     columnHeaders[1] = columnIndex;
     columnHeaders[2] = (int)(cw.type().id()); // data-type of the column
     // whether the column has null array, 1 has the null buffer, 0 means no null buffer
@@ -225,29 +225,34 @@ bool CudfAllToAll::insertColumnToA2A(const cudf::column_view &cw, int columnInde
         bufferSize = dataLength(cw);
 //    LOG(INFO) << myrank << "******* inserting column buffer with length: " << dataLen;
     }
-    // insert the buffer
+    // insert the data buffer
+    if(bufferSize < 0) {
+        LOG(ERROR) << myrank << " ******* bufferSize: " << bufferSize;
+    }
     bool accepted = all_->insert(dataBuffer, bufferSize, target, columnHeaders, headersLength);
     if (!accepted) {
-        LOG(ERROR) << myrank << "******* data buffer not accepted to be sent";
+        LOG(ERROR) << myrank << " ******* data buffer not accepted to be sent";
         return false;
     }
 
-    // send null buffer
+    // insert null buffer if exists
     if (cw.nullable()) {
         uint8_t * nullBuffer = (uint8_t *)cw.null_mask();
         std::size_t nullBufSize = cudf::bitmask_allocation_size_bytes(cw.size());
-//        LOG(INFO) << myrank << "******** inserting null buffer with length: " << nullBufSize;
+        if(nullBufSize < 0) {
+            LOG(ERROR) << myrank << " ******* nullBufSize: " << nullBufSize;
+        }
         accepted = all_->insert(nullBuffer, nullBufSize, target);
         if (!accepted) {
-            LOG(ERROR) << myrank << ", nullable buffer not accepted to be sent";
+            LOG(ERROR) << myrank << " ******* nullable buffer not accepted to be sent";
             return false;
         }
     }
 
-    if (offsetsBuffer) {
+    if (offsetsSize >= 0) {
         accepted = all_->insert(offsetsBuffer, offsetsSize, target);
         if (!accepted) {
-            LOG(ERROR) << myrank << ", offsets buffer not accepted to be sent";
+            LOG(ERROR) << myrank << " ******* offsets buffer not accepted to be sent";
             return false;
         }
     }
@@ -510,7 +515,7 @@ int main(int argc, char *argv[]) {
         return true;
     };
 
-    CudfAllToAll * cA2A = new CudfAllToAll(ctx, allWorkers, allWorkers, 1, callback);
+    CudfAllToAll * cA2A = new CudfAllToAll(ctx, allWorkers, allWorkers, ctx->GetNextSequence(), callback);
 
     // construct table
     std::string input_csv_file = argv[1];
