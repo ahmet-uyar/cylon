@@ -478,6 +478,35 @@ void columnDataTypes(cudf::table * table) {
     }
 }
 
+void printFirstLastElements(cudf::table_view &tv) {
+    for (int i = 0; i < tv.num_columns(); ++i) {
+        cudf::column_view cw = tv.column(i);
+        LOG(INFO) << myrank << ", column[" << i << "], size: " << cw.size() << ", data type: " << static_cast<int>(cw.type().id());
+        if (cw.type().id() == cudf::type_id::STRING) {
+            cudf::strings_column_view scv(cw);
+            cudf::strings::print(scv, 0, 1);
+            cudf::strings::print(scv, cw.size()-1, cw.size());
+        } else {
+            int dl = dataLength(cw);
+            uint8_t *hostArray= new uint8_t[dl];
+            cudaMemcpy(hostArray, cw.data<uint8_t>(), dl, cudaMemcpyDeviceToHost);
+            if (cw.type().id() == cudf::type_id::INT32) {
+                int32_t *hdata = (int32_t *) hostArray;
+                LOG(INFO) << myrank << "::::: first and last data: " << hdata[0] << ", " << hdata[cw.size() - 1];
+            } else if (cw.type().id() == cudf::type_id::INT64) {
+                int64_t *hdata = (int64_t *) hostArray;
+                LOG(INFO) << myrank << "::::: first and last data: " << hdata[0] << ", " << hdata[cw.size() - 1];
+            } else if (cw.type().id() == cudf::type_id::FLOAT32) {
+                float *hdata = (float *) hostArray;
+                LOG(INFO) << myrank << "::::: first and last data: " << hdata[0] << ", " << hdata[cw.size() - 1];
+            } else if (cw.type().id() == cudf::type_id::FLOAT64) {
+                double *hdata = (double *) hostArray;
+                LOG(INFO) << myrank << "::::: first and last data: " << hdata[0] << ", " << hdata[cw.size() - 1];
+            }
+        }
+    }
+}
+
 int main(int argc, char *argv[]) {
 
     if (argc != 2) {
@@ -507,11 +536,7 @@ int main(int argc, char *argv[]) {
     CudfCallback callback = [=](int source, const std::shared_ptr<cudf::table> &table, int reference) {
         LOG(INFO) << "received a table ...................)))))))))))))))))))))))))))";
         cudf::table_view tv = table->view();
-        for (int i = 0; i < tv.num_columns(); ++i) {
-            if (tv.column(i).type().id() != cudf::type_id::STRING) {
-                testColumnAccess(tv.column(i));
-            }
-        }
+        printFirstLastElements(tv);
         return true;
     };
 
@@ -536,7 +561,7 @@ int main(int argc, char *argv[]) {
 
     int i = 1;
     while(!cA2A->isComplete()) {
-        if (i % 100 == 0) {
+        if (i % 1000 == 0) {
             LOG(INFO) << myrank << ", has not completed yet.";
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
