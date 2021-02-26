@@ -1,8 +1,5 @@
 add_definitions(-DEXAMPLE_CMAKE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}\")
 
-# find CUDA
-find_package(CUDAToolkit REQUIRED)
-
 #build a binary
 macro(cylon_add_exe EXENAME)
     add_executable(${EXENAME} ${EXENAME}.cpp)
@@ -52,6 +49,12 @@ endmacro(cylon_add_exe2)
 cylon_add_exe2(ops com_comm_test)
 cylon_add_exe2(ops join_op_example)
 
+###################################################################
+# add cuda example
+
+# find CUDA
+find_package(CUDAToolkit REQUIRED)
+
 #build a binary with cuda
 macro(cylon_add_exe3 EXENAME)
     add_executable(${EXENAME} ${EXENAME}.cpp)
@@ -66,7 +69,7 @@ endmacro(cylon_add_exe3)
 cylon_add_exe3(mpi_cuda_test)
 
 ###################################################################
-# add cuda include dir
+# add cudf example
 SET(CONDA_DIR /home/auyar/anaconda3/envs/cudf_dev/)
 include_directories(
         ${CONDA_DIR}/include
@@ -75,7 +78,7 @@ include_directories(
 
 #build a binary with cuda
 macro(cylon_add_exe4 EXENAME)
-    add_executable(${EXENAME} ${EXENAME}.cpp)
+    add_executable(${EXENAME} ${EXENAME}.cpp cudf_a2a.cpp)
     target_link_libraries(${EXENAME} ${MPI_LIBRARIES})
     target_link_libraries(${EXENAME} cylon)
     target_link_libraries(${EXENAME} ${ARROW_LIB})
@@ -102,4 +105,4 @@ macro(cylon_add_exe4 EXENAME)
 endmacro(cylon_add_exe4)
 
 cylon_add_exe4(cudf_test)
-cylon_add_exe4(cudf_a2a)
+cylon_add_exe4(a2a_cudf_test)

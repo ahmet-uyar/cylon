@@ -1,48 +1,14 @@
+#include "include/cudf_a2a.hpp"
+
 #include <iostream>
 #include <cmath>
 #include <bitset>
 
-#include <cudf/types.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/io/types.hpp>
 #include <cudf/io/csv.hpp>
-#include <cudf/column/column_factories.hpp>
-#include <cudf/table/table.hpp>
-#include <cudf/column/column.hpp>
 #include <cudf/strings/strings_column_view.hpp>
-#include <cudf/null_mask.hpp>
-
-#include <cuda_runtime.h>
-#include <rmm/cuda_stream_view.hpp>
-
-// sizes of cudf types in tables
-// ref: type_id in cudf/types.hpp
-int type_bytes[] = {0, 1, 2, 4, 8, 1, 2, 4, 8, 4, 8, 1, 4, 8, 8, 8, 8, 4, 8, 8, 8, 8, -1, -1, -1, 4, 8, -1, -1};
-
-/**
- * whether the data type is uniform in size such as int (4 bytes) or string(variable length)
- * @param input
- * @return
- */
-int data_type_size(cudf::column_view const& cw){
-    return type_bytes[static_cast<int>(cw.type().id())];
-}
-
-/**
- * data buffer length of a column in bytes
- * @param input
- * @return
- */
-cudf::size_type dataLength(cudf::column_view const& input){
-    int elementSize = type_bytes[static_cast<int>(input.type().id())];
-    if (elementSize == -1) {
-        std::cout << "ERRORRRRRR unsupported type id: " << static_cast<int>(input.type().id()) << std::endl;
-        return -1;
-    }
-
-    // even null values exist in the buffer with unspecified values
-    return elementSize * input.size();
-}
+#include <cudf/scalar/scalar.hpp>
 
 std::unique_ptr<cudf::column> emptyLike(cudf::column_view const& input){
     int dl = dataLength(input);

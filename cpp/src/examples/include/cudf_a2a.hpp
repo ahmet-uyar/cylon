@@ -15,6 +15,8 @@
 #include <cudf/table/table.hpp>
 #include <cudf/column/column.hpp>
 
+cudf::size_type dataLength(cudf::column_view const& cw);
+
 class CudfBuffer : public cylon::Buffer {
 public:
     explicit CudfBuffer(std::shared_ptr<rmm::device_buffer> rmmBuf);
