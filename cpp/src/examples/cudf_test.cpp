@@ -5,10 +5,17 @@
 #include <bitset>
 
 #include <cudf/copying.hpp>
+#include <cudf/concatenate.hpp>
+#include <cudf/partitioning.hpp>
 #include <cudf/io/types.hpp>
 #include <cudf/io/csv.hpp>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/scalar/scalar.hpp>
+#include <cudf/detail/get_value.cuh>
+
+using std::cout;
+using std::endl;
+using std::string;
 
 std::unique_ptr<cudf::column> emptyLike(cudf::column_view const& input){
     int dl = dataLength(input);
@@ -93,8 +100,85 @@ void printChildColumns(cudf::table_view tview) {
     }
 }
 
+int tableConcat(int argc, char** argv) {
+
+    if (argc != 3) {
+        std::cout << "You must specify two CSV input files.\n";
+        return 1;
+    }
+    string input_csv_file1 = argv[1];
+    cudf::io::source_info si1(input_csv_file1);
+    cudf::io::csv_reader_options options1 = cudf::io::csv_reader_options::builder(si1);
+    cudf::io::table_with_metadata ctable1 = cudf::io::read_csv(options1);
+    cout << "table from: " << input_csv_file1 << ", number of columns: " << ctable1.tbl->num_columns()
+         << ", first column size: " << ctable1.tbl->get_column(0).size() << endl;
+
+    std::string input_csv_file2 = argv[2];
+    cudf::io::source_info si2(input_csv_file2);
+    cudf::io::csv_reader_options options2 = cudf::io::csv_reader_options::builder(si2);
+    cudf::io::table_with_metadata ctable2 = cudf::io::read_csv(options2);
+    cout << "table from: " << input_csv_file2 << ", number of columns: " << ctable2.tbl->num_columns()
+         << ", first column size: " << ctable2.tbl->get_column(0).size() << endl;
+
+    std::vector<cudf::table_view> tables_to_concat{};
+    tables_to_concat.push_back(ctable1.tbl->view());
+    tables_to_concat.push_back(ctable2.tbl->view());
+    std::unique_ptr<cudf::table> contatTable = cudf::concatenate(tables_to_concat);
+    cout << "concatenated table, number of columns: " << contatTable->num_columns()
+         << ", first column size: " << contatTable->get_column(0).size() << endl;
+
+    return 0;
+}
+
+void printLongColumn(cudf::column_view const& input, int index) {
+    cout << "column[" << index << "]: ";
+    for (cudf::size_type i = 0; i < input.size(); ++i) {
+        cout << cudf::detail::get_value<int64_t>(input, i, rmm::cuda_stream_default) << ", ";
+    }
+    cout << endl;
+}
+
+
+int tablePartition(int argc, char** argv) {
+
+    if (argc != 2) {
+        std::cout << "You must specify two CSV input files.\n";
+        return 1;
+    }
+    string input_csv_file1 = argv[1];
+    cudf::io::source_info si1(input_csv_file1);
+    cudf::io::csv_reader_options options1 = cudf::io::csv_reader_options::builder(si1);
+    cudf::io::table_with_metadata ctable1 = cudf::io::read_csv(options1);
+    cout << "table from: " << input_csv_file1 << ", number of columns: " << ctable1.tbl->num_columns()
+         << ", first column size: " << ctable1.tbl->get_column(0).size() << endl;
+
+    printLongColumn(ctable1.tbl->get_column(0).view(), 0);
+
+    std::vector<cudf::size_type> columns_to_hash{};
+    columns_to_hash.push_back(0);
+
+    std::pair<std::unique_ptr<cudf::table>, std::vector<cudf::size_type>> pr
+        = cudf::hash_partition(ctable1.tbl->view(), columns_to_hash, 10);
+
+    cout << "partitioned table, number of columns: " << pr.first->num_columns()
+         << ", first column size: " << pr.first->get_column(0).size() << endl;
+
+    cout << "offsets: ";
+    for (auto offset: pr.second) {
+        cout << offset << ", ";
+    }
+    cout << endl;
+
+    printLongColumn(pr.first->get_column(0).view(), 0);
+
+    return 0;
+}
+
 int main(int argc, char** argv) {
-    std::cout << "CUDF Example\n";
+    cout << "CUDF Example\n";
+
+//    return tableConcat(argc, argv);
+    return tablePartition(argc, argv);
 
     if (argc != 2) {
         std::cout << "You must specify a CSV input file.\n";
