@@ -138,7 +138,7 @@ int main(int argc, char *argv[]) {
     cudaSetDevice(myRank % numberOfGPUs);
 
     // define call back to catch the receiving tables
-    CudfCallback callback = [=](int source, const std::shared_ptr<cudf::table> &table, int reference) {
+    CudfCallback callback = [](int source, const std::shared_ptr<cudf::table> &table, int reference) {
         LOG(INFO) << "received a table ...................)))))))))))))))))))))))))))";
         cudf::table_view tv = table->view();
         printFirstLastElements(tv);

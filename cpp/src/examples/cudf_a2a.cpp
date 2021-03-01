@@ -195,7 +195,6 @@ bool CudfAllToAll::isComplete() {
               return false;
           }
 
-//          insertTableToA2A(currentPair.first, t.first, currentPair.second);
           LOG(INFO) << myrank << ", inserted table for A2A. target: " << pendingSend.first << ", ref: " << currentPair.second;
         }
     }
