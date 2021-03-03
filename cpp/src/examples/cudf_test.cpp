@@ -170,6 +170,8 @@ int tablePartition(int argc, char** argv) {
     cout << endl;
 
     printLongColumn(pr.first->get_column(0).view(), 0);
+    cout << "original table column:" << endl;
+    printLongColumn(ctable1.tbl->get_column(0).view(), 0);
 
     return 0;
 }
