@@ -14,12 +14,14 @@
 #include <cudf/types.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/column/column.hpp>
+#include <cudf/strings/strings_column_view.hpp>
+#include <cudf/detail/get_value.cuh>
 
 cudf::size_type dataLength(cudf::column_view const& cw);
 
 class CudfBuffer : public cylon::Buffer {
 public:
-    explicit CudfBuffer(std::shared_ptr<rmm::device_buffer> rmmBuf);
+    CudfBuffer(std::shared_ptr<rmm::device_buffer> rmmBuf);
     int64_t GetLength() override;
     uint8_t * GetByteBuffer() override;
     std::shared_ptr<rmm::device_buffer> getBuf() const;
@@ -34,17 +36,21 @@ public:
 
 class PendingBuffer {
 public:
-    explicit PendingBuffer(const uint8_t *buffer,
-                           int bufferSize,
-                           int target,
-                           std::unique_ptr<int []> headers = nullptr,
-                           int headersLength = -1);
+    PendingBuffer(const uint8_t *buffer,
+                  int bufferSize,
+                  int target,
+                  std::unique_ptr<int []> headers = nullptr,
+                  int headersLength = -1);
 
-    explicit PendingBuffer(int target,
-                           std::unique_ptr<int []> headers,
-                           int headersLength);
+    PendingBuffer(int target,
+                  std::unique_ptr<int []> headers,
+                  int headersLength);
 
     bool sendBuffer(std::shared_ptr<cylon::AllToAll> all);
+
+//    inline void setMaskBuf(std::shared_ptr<rmm::device_buffer> mb) {
+//        maskBuf = mb;
+//    }
 
 private:
     const uint8_t *buffer;
@@ -52,6 +58,84 @@ private:
     int target;
     std::unique_ptr<int []> headers;
     int headersLength;
+};
+
+/**
+ * column view for CuDF column to get the buffer to send
+ */
+class PartColumnView {
+public:
+    PartColumnView(const cudf::column_view &cv, const std::vector<cudf::size_type> &partIndexes);
+
+    const uint8_t * getDataBuffer(int partIndex);
+    int getDataBufferSize(int partIndex);
+
+    const uint8_t * getOffsetBuffer(int partIndex);
+    int getOffsetBufferSize(int partIndex);
+
+    const uint8_t * getMaskBuffer(int partIndex);
+    int getMaskBufferSize(int partIndex);
+
+    inline int numberOfElements(int partIndex) {
+        return partIndexes[partIndex + 1] - partIndexes[partIndex];
+    }
+
+    inline int getColumnTypeId() {
+        return (int)cv.type().id();
+    }
+
+    inline const cudf::column_view & getColumnView() {
+        return cv;
+    }
+
+private:
+    // private members
+    const cudf::column_view &cv;
+    std::unique_ptr<cudf::strings_column_view> scv;
+    // partition indices, last one shows the limit of the previous one
+    // there are partIndexes.size()-1 partitions
+    const std::vector<cudf::size_type> & partIndexes;
+
+    // partition char offsets on a single char array for the column
+    // last index shows the end of the last string
+    std::vector<cudf::size_type> partCharOffsets{};
+
+    // this is to prevent std::shared_ptr<rmm::device_buffer> to be deleted before they are sent out
+    std::unordered_map<int, rmm::device_buffer> maskBuffers{};
+};
+
+/**
+ * partitioned cudf table view
+ * to get partitioned column buffers to be sent out
+ */
+class PartTableView {
+public:
+    PartTableView(cudf::table_view &tv, std::vector<cudf::size_type> &partIndexes);
+
+    std::shared_ptr<PartColumnView> column(int columnIndex);
+
+    inline int numberOfColumns() {
+        return tv.num_columns();
+    }
+
+    inline int numberOfRows(int partIndex) {
+        return partIndexes[partIndex + 1] - partIndexes[partIndex];
+    }
+
+    inline int numberOfParts() {
+        return partIndexes.size() - 1;
+    }
+
+private:
+    // private members
+    cudf::table_view tv;
+
+    // partitioned column views
+    std::unordered_map<int, std::shared_ptr<PartColumnView>> columns{};
+
+    // partition indices, last one shows the limit of the previous one
+    // there are partIndexes.size()-1 partitions
+    std::vector<cudf::size_type> & partIndexes;
 };
 
 /**
@@ -118,21 +202,33 @@ public:
   /**
    * Insert a table to be sent, if the table is accepted return true
    *
-   * @param table the table to send
+   * @param tview the table to send
    * @param target the target to send the table
    * @return true if the buffer is accepted
    */
-  int insert(const std::shared_ptr<cudf::table_view> &table, int32_t target);
+  int insert(const std::shared_ptr<cudf::table_view> &tview, int32_t target);
 
   /**
    * Insert a table to be sent, if the table is accepted return true
    *
-   * @param table the table to send
+   * @param tview the table to send
    * @param target the target to send the table
    * @param reference a reference that can be sent in the header
    * @return true if the buffer is accepted
    */
-  int insert(const std::shared_ptr<cudf::table_view> &table, int32_t target, int32_t reference);
+  int insert(const std::shared_ptr<cudf::table_view> &tview, int32_t target, int32_t reference);
+
+    /**
+     * Insert a partitioned table to be sent, if the table is accepted return true
+     * Can not sent more than one partitioned table at once,
+     * before finishing to send a partitioned table, if another one is asked,
+     * zero is returned
+     *
+     * @param tview partitioned table to be sent
+     * @param offsets partitioning offsets in the table
+     * @return true if the buffer is accepted
+     */
+  int insert(cudf::table_view &tview, std::vector<cudf::size_type> &offsets, int ref);
 
   /**
    * Check weather the operation is complete, this method needs to be called until the operation is complete
@@ -170,10 +266,29 @@ public:
 private:
     bool insertBuffers(std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue);
 
+    std::unique_ptr<int []> makeTableHeader(int headersLength, int ref, int numberOfColumns, int numberOfRows);
+
+    void makePartTableBuffers(int target,
+                              int ref,
+                              std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue);
+
     void makeTableBuffers(std::shared_ptr<cudf::table_view> table,
                           int target,
                           int ref,
                           std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue);
+
+    std::unique_ptr<int []> makeColumnHeader(int headersLength,
+                                             int columnIndex,
+                                             int typeId,
+                                             bool hasMask,
+                                             bool hasOffset,
+                                             int numberOfElements);
+
+    void makePartColumnBuffers(std::shared_ptr<PartColumnView> pcv,
+                           int partIndex,
+                           int columnIndex,
+                           int target,
+                           std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue);
 
     void makeColumnBuffers(const cudf::column_view &cw,
                            int columnIndex,
@@ -231,6 +346,8 @@ private:
 
     bool completed_;
     bool finishCalled_;
+
+    std::unique_ptr<PartTableView> ptview;
 };
 
 #endif //CYLON_CUDF_H

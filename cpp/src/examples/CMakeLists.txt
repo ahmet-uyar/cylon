@@ -78,7 +78,7 @@ include_directories(
 
 #build a binary with cuda
 macro(cylon_add_exe4 EXENAME)
-    add_executable(${EXENAME} ${EXENAME}.cpp cudf_a2a.cpp)
+    add_executable(${EXENAME} ${EXENAME}.cpp cudf/cudf_a2a.cpp cudf/gtable.cpp)
     target_link_libraries(${EXENAME} ${MPI_LIBRARIES})
     target_link_libraries(${EXENAME} cylon)
     target_link_libraries(${EXENAME} ${ARROW_LIB})
@@ -105,4 +105,5 @@ macro(cylon_add_exe4 EXENAME)
 endmacro(cylon_add_exe4)
 
 cylon_add_exe4(cudf_test)
-cylon_add_exe4(a2a_cudf_test)
+#cylon_add_exe4(a2a_cudf_test)
+cylon_add_exe4(gtable_test)

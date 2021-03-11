@@ -2,14 +2,17 @@
 // Created by auyar on 3.02.2021.
 //
 
-#include "include/cudf_a2a.hpp"
+#include "cudf_a2a.hpp"
+#include "gtable.hpp"
+#include "util.hpp"
+#include "cudf_a2a.cuh"
 
 #include <glog/logging.h>
 #include <net/mpi/mpi_communicator.hpp>
 #include <cudf/strings/strings_column_view.hpp>
-
-// test variable
-int myrank = -1;
+#include <cudf/null_mask.hpp>
+#include <cudf/binaryop.hpp>
+#include <cudf/scalar/scalar.hpp>
 
 //////////////////////////////////////////////////////////////////////
 // global types and fuctions
@@ -51,6 +54,19 @@ cudf::size_type dataLength(cudf::column_view const& cw){
 
     // even null values exist in the buffer with unspecified values
     return elementSize * cw.size();
+}
+
+/**
+ * get one int value from device to host
+ * todo: make it template type
+ * @param buff
+ * @return
+ */
+int32_t getInt(uint8_t * buff) {
+    uint8_t *hostArray= new uint8_t[4];
+    cudaMemcpy(hostArray, buff, 4, cudaMemcpyDeviceToHost);
+    int32_t * hdata = (int32_t *) hostArray;
+    return hdata[0];
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -112,7 +128,7 @@ bool PendingBuffer::sendBuffer(std::shared_ptr<cylon::AllToAll> all) {
     if (bufferSize < 0) {
         bool accepted = all->insert(nullptr, 0, target, headers.get(), headersLength);
         if (!accepted) {
-            LOG(WARNING) << myrank << " header buffer not accepted to be sent";
+            LOG(WARNING) << " header buffer not accepted to be sent";
         }
         return accepted;
     }
@@ -121,17 +137,118 @@ bool PendingBuffer::sendBuffer(std::shared_ptr<cylon::AllToAll> all) {
     if (headersLength < 0) {
         bool accepted = all->insert(buffer, bufferSize, target);
         if (!accepted) {
-            LOG(WARNING) << myrank << " data buffer not accepted to be sent";
+            LOG(WARNING) << " data buffer not accepted to be sent";
         }
         return accepted;
     }
 
     bool accepted = all->insert(buffer, bufferSize, target, headers.get(), headersLength);
     if (!accepted) {
-        LOG(WARNING) << myrank << " data buffer with header not accepted to be sent";
+        LOG(WARNING) << " data buffer with header not accepted to be sent";
     }
     return accepted;
 }
+
+//////////////////////////////////////////////////////////////////////
+// PartColumnView implementations
+//////////////////////////////////////////////////////////////////////
+PartColumnView::PartColumnView(const cudf::column_view &cv, const std::vector<cudf::size_type> &partIndexes)
+    : cv(cv), partIndexes(partIndexes) {
+
+    if (cv.type().id() == cudf::type_id::STRING) {
+        scv = std::make_unique<cudf::strings_column_view>(this->cv);
+
+        int strOffsetsSize = scv->offsets().size();
+        auto strOffsetsArray = std::make_unique<int32_t []>(strOffsetsSize);
+        cudaMemcpy(strOffsetsArray.get(),
+                   scv->offsets().data<int32_t>(),
+                   strOffsetsSize * cudf::size_of(scv->offsets().type()),
+                   cudaMemcpyDeviceToHost);
+
+        for (int i = 0; i < partIndexes.size(); ++i) {
+            partCharOffsets.push_back(strOffsetsArray[partIndexes[i]]);
+        }
+    }
+
+    if (cv.nullable()) {
+        for (int i = 0; i < partIndexes.size() -1; ++i) {
+            auto maskBuf = cudf::copy_bitmask(cv.null_mask(), partIndexes[i], partIndexes[i+1]);
+            maskBuffers.insert(std::make_pair(i, maskBuf));
+        }
+        rmm::cuda_stream_default.synchronize();
+    }
+}
+
+const uint8_t * PartColumnView::getDataBuffer(int partIndex) {
+    if (cv.type().id() == cudf::type_id::STRING) {
+        return scv->chars().data<uint8_t>() + partCharOffsets[partIndex];
+    }
+
+    int startPos = cudf::size_of(cv.type()) * partIndexes[partIndex];
+    return cv.data<uint8_t>() + startPos;
+}
+
+int PartColumnView::getDataBufferSize(int partIndex) {
+    if (cv.type().id() == cudf::type_id::STRING) {
+        return partCharOffsets[partIndex + 1] - partCharOffsets[partIndex];
+    }
+
+    return cudf::size_of(cv.type()) * numberOfElements(partIndex);
+}
+
+const uint8_t * PartColumnView::getOffsetBuffer(int partIndex) {
+    if (cv.type().id() == cudf::type_id::STRING) {
+        return scv->offsets().data<uint8_t>() + partIndexes[partIndex] * cudf::size_of(scv->offsets().type());
+//        return (uint8_t *)(strOffsetArrays.at(partIndex).get());
+    }
+
+    return nullptr;
+}
+
+int PartColumnView::getOffsetBufferSize(int partIndex) {
+    if (cv.type().id() == cudf::type_id::STRING) {
+        if (numberOfElements(partIndex) == 0) {
+            return 0;
+        } else {
+            return (numberOfElements(partIndex) + 1) * cudf::size_of(scv->offsets().type());
+        }
+    }
+
+    return 0;
+}
+
+const uint8_t * PartColumnView::getMaskBuffer(int partIndex) {
+    if (!cv.nullable()) {
+        return nullptr;
+    }
+    return (uint8_t *)maskBuffers.at(partIndex).data();
+}
+
+int PartColumnView::getMaskBufferSize(int partIndex) {
+    if (!cv.nullable())
+        return 0;
+    return maskBuffers.at(partIndex).size();
+}
+
+//////////////////////////////////////////////////////////////////////
+// PartTableView implementations
+//////////////////////////////////////////////////////////////////////
+PartTableView::PartTableView(cudf::table_view &tv, std::vector<cudf::size_type> &partIndexes)
+        : tv(tv), partIndexes(partIndexes) {
+
+    // add the limit of the last partition
+    partIndexes.push_back(tv.num_rows());
+
+    for (int i = 0; i < this->tv.num_columns(); ++i) {
+        auto pcv = std::make_shared<PartColumnView>(this->tv.column(i), this->partIndexes);
+        columns.insert(std::make_pair(i, pcv));
+    }
+}
+
+std::shared_ptr<PartColumnView> PartTableView::column(int columnIndex) {
+    return columns.at(columnIndex);
+}
+
 //////////////////////////////////////////////////////////////////////
 // CudfAllToAll implementations
 //////////////////////////////////////////////////////////////////////
@@ -175,6 +292,20 @@ int CudfAllToAll::insert(const std::shared_ptr<cudf::table_view> &table,
     return 1;
 }
 
+int CudfAllToAll::insert(cudf::table_view &tview, std::vector<cudf::size_type> &offsets, int ref) {
+
+    // if there is already a partitioned table being sent, return false
+    if (ptview)
+        return 0;
+
+    ptview = std::make_unique<PartTableView>(tview, offsets);
+    for (int i = 0; i < ptview->numberOfParts(); ++i) {
+        makePartTableBuffers(i, ref, inputs_.at(i)->bufferQueue);
+    }
+
+    return 1;
+}
+
 bool CudfAllToAll::isComplete() {
 
     for (const auto &pendingSend : inputs_) {
@@ -202,7 +333,15 @@ bool CudfAllToAll::isComplete() {
     if (!finished)
         finish();
 
-    return all_->isComplete();
+    if (!all_->isComplete()) {
+        return false;
+    }
+
+    // all done, reset PartTableView if exists
+    if (ptview)
+        ptview.reset();
+
+    return true;
 }
 
 bool CudfAllToAll::insertBuffers(std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue) {
@@ -219,24 +358,104 @@ bool CudfAllToAll::insertBuffers(std::queue<std::shared_ptr<PendingBuffer>> &buf
     return true;
 }
 
+std::unique_ptr<int []> CudfAllToAll::makeTableHeader(int headersLength,
+                                                      int ref,
+                                                      int numberOfColumns,
+                                                      int numberOfRows) {
+    auto tableHeaders = std::make_unique<int []>(headersLength);
+    tableHeaders[0] = 0; // shows it is a table header. todo: make it enum
+    tableHeaders[1] = ref;
+    tableHeaders[2] = numberOfColumns;
+    tableHeaders[3] = numberOfRows;
+    return std::move(tableHeaders);
+}
+
+std::unique_ptr<int []> CudfAllToAll::makeColumnHeader(int headersLength,
+                                                       int columnIndex,
+                                                       int typeId,
+                                                       bool hasMask,
+                                                       bool hasOffset,
+                                                       int numberOfElements) {
+
+    auto headers = std::make_unique<int []>(headersLength);
+    headers[0] = 1; // shows it is a column header
+    headers[1] = columnIndex;
+    headers[2] = typeId;
+    headers[3] = hasMask;
+    headers[4] = hasOffset;
+    headers[5] = numberOfElements;
+    return std::move(headers);
+}
+
 void CudfAllToAll::makeTableBuffers(std::shared_ptr<cudf::table_view> table,
                                     int target,
                                     int ref,
                                     std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue) {
     // construct header message to send
-    // for all columns, send data-type, whether it has null data and offsets buffer.
-    // header data
     int columns = table->num_columns();
-    int headersLength = 3;
-    auto tableHeaders = std::make_unique<int []>(headersLength);
-    tableHeaders[0] = 0; // shows it is a table header. todo: make it enum
-    tableHeaders[1] = ref;
-    tableHeaders[2] = columns;
+    int headersLength = 4;
+    auto tableHeaders = makeTableHeader(headersLength, ref, columns, table->num_rows());
     auto pb = std::make_shared<PendingBuffer>(target, std::move(tableHeaders), headersLength);
     bufferQueue.emplace(pb);
 
     for (int i = 0; i < columns; ++i) {
         makeColumnBuffers(table->column(i), i, target, bufferQueue);
+    }
+}
+
+void CudfAllToAll::makePartTableBuffers(int partIndex,
+                                        int ref,
+                                        std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue) {
+    int target = partIndex;
+
+    int columns = ptview->numberOfColumns();
+    int headersLength = 4;
+    auto tableHeaders = makeTableHeader(headersLength, ref, columns, ptview->numberOfRows(partIndex));
+    auto pb = std::make_shared<PendingBuffer>(target, std::move(tableHeaders), headersLength);
+    bufferQueue.emplace(pb);
+
+    // if there is zero rows in the partition, no need to send columns
+    if (ptview->numberOfRows(partIndex) == 0) {
+        return;
+    }
+
+    for (int i = 0; i < columns; ++i) {
+        makePartColumnBuffers(ptview->column(i), partIndex, i, target, bufferQueue);
+    }
+}
+
+void CudfAllToAll::makePartColumnBuffers(std::shared_ptr<PartColumnView> pcv,
+                                     int partIndex,
+                                     int columnIndex,
+                                     int target,
+                                     std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue) {
+
+    int headersLength = 6;
+    auto columnHeaders = makeColumnHeader(headersLength,
+                                          columnIndex,
+                                          pcv->getColumnTypeId(),
+                                          pcv->getColumnView().nullable(),
+                                          pcv->getColumnView().num_children(),
+                                          pcv->numberOfElements(partIndex));
+
+
+    auto pb = std::make_shared<PendingBuffer>(pcv->getDataBuffer(partIndex),
+                                              pcv->getDataBufferSize(partIndex),
+                                              target,
+                                              std::move(columnHeaders),
+                                              headersLength);
+    bufferQueue.emplace(pb);
+
+    if (pcv->getColumnView().nullable()) {
+        pb = std::make_shared<PendingBuffer>(pcv->getMaskBuffer(partIndex), pcv->getMaskBufferSize(partIndex), target);
+        bufferQueue.emplace(pb);
+    }
+
+    if (pcv->getOffsetBufferSize(partIndex) > 0) {
+        pb = std::make_shared<PendingBuffer>(pcv->getOffsetBuffer(partIndex),
+                                             pcv->getOffsetBufferSize(partIndex),
+                                             target);
+        bufferQueue.emplace(pb);
     }
 }
 
@@ -250,17 +469,23 @@ void CudfAllToAll::makeColumnBuffers(const cudf::column_view &cw,
         throw "only uniform-size data-types and the string is supported.";
     }
 
+//    auto columnHeaders = std::make_unique<int []>(headersLength);
+//    columnHeaders[0] = 1; // it is a column header.
+//    columnHeaders[1] = columnIndex;
+//    columnHeaders[2] = (int)(cw.type().id()); // data-type of the column
+//    // whether the column has null array, 1 has the null buffer, 0 means no null buffer
+//    columnHeaders[3] = cw.nullable() ? 1 : 0;
+//    //whether the column has offsets array
+//    columnHeaders[4] = (cw.num_children() > 0) ? 1 : 0;
+//    // number of elements in the column
+//    columnHeaders[5] = cw.size();
     int headersLength = 6;
-    auto columnHeaders = std::make_unique<int []>(headersLength);
-    columnHeaders[0] = 1; // it is a column header.
-    columnHeaders[1] = columnIndex;
-    columnHeaders[2] = (int)(cw.type().id()); // data-type of the column
-    // whether the column has null array, 1 has the null buffer, 0 means no null buffer
-    columnHeaders[3] = cw.nullable() ? 1 : 0;
-    //whether the column has offsets array
-    columnHeaders[4] = (cw.num_children() > 0) ? 1 : 0;
-    // number of elements in the column
-    columnHeaders[5] = cw.size();
+    auto columnHeaders = makeColumnHeader(headersLength,
+                                          columnIndex,
+                                          (int)(cw.type().id()),
+                                          cw.nullable(),
+                                          cw.num_children(),
+                                          cw.size());
 
     // insert data buffer
     const uint8_t *dataBuffer;
@@ -344,6 +569,17 @@ void CudfAllToAll::constructColumn(std::shared_ptr<PendingReceives> pr) {
         auto charsColumn = std::make_unique<cudf::column>(cdt, pr->dataBufferLen, *dataBuffer);
         auto odt = cudf::data_type{cudf::type_id::INT32};
         auto offsetsColumn = std::make_unique<cudf::column>(odt, pr->dataSize + 1, *offsetsBuffer);
+        int32_t offsetBase = getInt((uint8_t *)offsetsBuffer->data());
+        // todo: can offsets start from non zero values in non-partitioned tables
+        //       we need to make sure of this
+        if (offsetBase > 0) {
+            auto base = std::make_unique<cudf::numeric_scalar<int32_t>>(offsetBase, true);
+            offsetsColumn =
+                cudf::binary_operation(offsetsColumn->view(), *base, cudf::binary_operator::SUB, offsetsColumn->type());
+            cudaDeviceSynchronize();
+            // todo: write a cuda kernel function to avoid column copying
+            // callRebaseOffsets((int32_t *)offsetsBuffer->data(), pr->dataSize + 1, offsetBase);
+        }
 
         std::vector<std::unique_ptr<cudf::column>> children;
         children.emplace_back(std::move(offsetsColumn));
@@ -399,7 +635,7 @@ std::shared_ptr<cudf::table> CudfAllToAll::constructTable(std::shared_ptr<Pendin
  * This function is called when a data is received
  */
 bool CudfAllToAll::onReceive(int source, std::shared_ptr<cylon::Buffer> buffer, int length) {
-  LOG(INFO) << myrank << ",,,,, buffer received from the source: " << source << ", with length: " << length;
+//  LOG(INFO) << myrank << ",,,,, buffer received from the source: " << source << ", with length: " << length;
   if (length == 0) {
       return true;
   }
@@ -410,34 +646,28 @@ bool CudfAllToAll::onReceive(int source, std::shared_ptr<cylon::Buffer> buffer, 
   if (!pr->dataBuffer) {
     pr->dataBuffer = cb->getBuf();
     pr->dataBufferLen = length;
-    LOG(INFO) << myrank <<  " ##### "<< pr->columnIndex << " assigned data buffer";
 
     // if there is no null buffer or offset buffer, create the column
     if(!pr->hasNullBuffer && !pr->hasOffsetBuffer) {
         constructColumn(pr);
-        LOG(INFO) << myrank <<  " ##### "<< pr->columnIndex << " constructed column";
     }
   } else if(pr->hasNullBuffer && !pr->nullBuffer) {
       pr->nullBuffer = cb->getBuf();
-      LOG(INFO) << myrank <<  " ##### "<< pr->columnIndex << " assigned null buffer";
       // if there is no offset buffer, create the column
       if (!pr->hasOffsetBuffer) {
           constructColumn(pr);
-          LOG(INFO) << myrank <<  " ##### "<< pr->columnIndex << " constructed column with null buffer";
       }
   } else if(pr->hasOffsetBuffer && !pr->offsetsBuffer) {
       pr->offsetsBuffer = cb->getBuf();
-      LOG(INFO) << myrank <<  " ##### "<< pr->columnIndex << " assigned offset buffer";
       constructColumn(pr);
-      LOG(INFO) << myrank <<  " ##### "<< pr->columnIndex << " constructed column with offset buffer";
-
   } else {
-      LOG(INFO) << myrank <<  " ##### "<< pr->columnIndex << " an unexpected buffer received from: " << source << ", buffer length: " << length;
+      LOG(WARNING) << myrank <<  " columnIndex: "<< pr->columnIndex << " an unexpected buffer received from: " << source
+            << ", buffer length: " << length;
+      return false;
   }
 
   // if all columns are created, create the table
   if (pr->columns.size() == pr->numberOfColumns) {
-      LOG(INFO) << myrank << "***** all columns are created. create the table.";
       std::shared_ptr<cudf::table> tbl = constructTable(pr);
       recv_callback_(source, tbl, pr->reference);
 
@@ -454,26 +684,30 @@ bool CudfAllToAll::onReceive(int source, std::shared_ptr<cylon::Buffer> buffer, 
  * Receive the header, this happens before we receive the actual data
  */
 bool CudfAllToAll::onReceiveHeader(int source, int finished, int *buffer, int length) {
-  LOG(INFO) << myrank << "----received a header buffer with length: " << length;
   if (length > 0) {
       if (buffer[0] == 0) { // table header
+          // if the incoming table has zero rows, if it is empty
+          // nothing to be done, no data will be received for this table.
+          // ignore the message
+          if (buffer[3] == 0) {
+              return true;
+          }
           std::shared_ptr<PendingReceives> pr = receives_.at(source);
           pr->reference = buffer[1];
           pr->numberOfColumns = buffer[2];
-          LOG(INFO) << myrank << "----received a table header from the source: " << source;
       } else if(buffer[0] == 1){ // column header
           std::shared_ptr<PendingReceives> pr = receives_.at(source);
           pr->columnIndex = buffer[1];
           pr->columnDataType = buffer[2];
-          pr->hasNullBuffer = buffer[3] == 0 ? false: true;
-          pr->hasOffsetBuffer = buffer[4] == 0 ? false: true;
+          pr->hasNullBuffer = buffer[3];
+          pr->hasOffsetBuffer = buffer[4];
           pr->dataSize = buffer[5];
-          LOG(INFO) << myrank << "----received a column header from the source: " << source
-                  << ", columnIndex: " << pr->columnIndex << std::endl
-                  << ", columnDataType: " << pr->columnDataType << std::endl
-                  << ", hasNullBuffer: " << pr->hasNullBuffer << std::endl
-                  << ", hasOffsetBuffer: " << pr->hasOffsetBuffer << std::endl
-                  << ", dataSize: " << pr->dataSize << std::endl;
+//          LOG(INFO) << myrank << "----received a column header from the source: " << source
+//                  << ", columnIndex: " << pr->columnIndex << std::endl
+//                  << ", columnDataType: " << pr->columnDataType << std::endl
+//                  << ", hasNullBuffer: " << pr->hasNullBuffer << std::endl
+//                  << ", hasOffsetBuffer: " << pr->hasOffsetBuffer << std::endl
+//                  << ", dataSize: " << pr->dataSize << std::endl;
       }
   }
   return true;
@@ -484,6 +718,6 @@ bool CudfAllToAll::onReceiveHeader(int source, int finished, int *buffer, int le
  * @return
  */
 bool CudfAllToAll::onSendComplete(int target, const void *buffer, int length) {
-  LOG(INFO) << myrank << ", SendComplete with length: " << length << " for the target: " << target;
+//  LOG(INFO) << myrank << ", SendComplete with length: " << length << " for the target: " << target;
   return true;
 }

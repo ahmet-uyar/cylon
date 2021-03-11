@@ -1,4 +1,4 @@
-#include "include/cudf_a2a.hpp"
+#include "cudf/cudf_a2a.hpp"
 
 #include <iostream>
 #include <cmath>
@@ -12,6 +12,8 @@
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/detail/get_value.cuh>
+#include <cudf/utilities/bit.hpp>
+#include <cudf/null_mask.hpp>
 
 using std::cout;
 using std::endl;
@@ -63,13 +65,12 @@ void printOffsetsArray(cudf::column_view cv) {
     std::cout << std::endl;
 }
 
-void printNullMask(cudf::column_view cv) {
+void printNullMask(cudf::column_view &cv) {
     if (!cv.nullable()) {
         std::cout << "the column is not nullable ......................: " << std::endl;
         return;
     }
     std::cout << "number of nulls in the column: " << cv.null_count() << std::endl;
-    std::cout << "offset for the first element in the column: " << cv.offset() << std::endl;
     std::size_t size = cudf::bitmask_allocation_size_bytes(cv.size());
     uint8_t *hostArray= new uint8_t[size];
     cudaMemcpy(hostArray, (uint8_t *)cv.null_mask(), size, cudaMemcpyDeviceToHost);
@@ -80,7 +81,17 @@ void printNullMask(cudf::column_view cv) {
     std::cout << std::endl;
 }
 
-void printChildColumns(cudf::table_view tview) {
+void testBits() {
+    cudf::bitmask_type a = cudf::set_most_significant_bits(10);
+    std::bitset<32> aa(a);
+    std::cout << "most sig 10: " << aa << std::endl;
+
+    cudf::bitmask_type b = cudf::set_least_significant_bits(10);
+    std::bitset<32> bb(b);
+    std::cout << "least sig 10: " << bb << std::endl;
+}
+
+void printChildColumns(cudf::table_view &tview) {
 
     for (int i = 0; i < tview.num_columns(); ++i) {
         cudf::column_view cw = tview.column(i);
@@ -130,14 +141,97 @@ int tableConcat(int argc, char** argv) {
     return 0;
 }
 
-void printLongColumn(cudf::column_view const& input, int index) {
-    cout << "column[" << index << "]: ";
+void printLongColumn(cudf::column_view const& input, int columnIndex) {
+    cout << "column[" << columnIndex << "]: ";
     for (cudf::size_type i = 0; i < input.size(); ++i) {
         cout << cudf::detail::get_value<int64_t>(input, i, rmm::cuda_stream_default) << ", ";
     }
     cout << endl;
 }
 
+void printLongColumnPart(const uint8_t * buff, int columnIndex, int start, int end) {
+    cout << "column[" << columnIndex << "][" << start << "-" << end << "]: ";
+    uint8_t *hostArray= new uint8_t[end-start];
+    cudaMemcpy(hostArray, buff, end-start, cudaMemcpyDeviceToHost);
+    int64_t * hdata = (int64_t *) hostArray;
+    int size = (end-start)/8;
+
+    for (int i = start; i < size; ++i) {
+        cout << hdata[i] << ", ";
+    }
+    cout << endl;
+}
+
+void printLongColumnPart(cudf::column_view const& input, int columnIndex, int start, int end) {
+    cout << "column[" << columnIndex << "][" << start << "-" << end << "]: ";
+    for (cudf::size_type i = start; i < input.size() && i < end; ++i) {
+        cout << cudf::detail::get_value<int64_t>(input, i, rmm::cuda_stream_default) << ", ";
+    }
+    cout << endl;
+}
+
+void printIntColumnPart(const uint8_t * buff, int columnIndex, int start, int end) {
+    cout << "column[" << columnIndex << "][" << start << "-" << end << "]: ";
+    int32_t * hdata = (int32_t *) buff;
+    int size = (end-start)/4;
+
+    for (int i = start; i < size; ++i) {
+        cout << hdata[i] << ", ";
+    }
+    cout << endl;
+}
+
+void printOffsetsColumn(cudf::column_view const& cv, int columnIndex) {
+    cout << "offsets column[" << columnIndex << "][" << cv.size() << "]: ";
+    uint8_t *hostArray= new uint8_t[cv.size() * 4];
+    cudaMemcpy(hostArray, cv.data<uint8_t>(), cv.size() * 4, cudaMemcpyDeviceToHost);
+    int32_t * hdata = (int32_t *) hostArray;
+
+    for (int i = 0; i < cv.size(); ++i) {
+        cout << hdata[i] << ", ";
+    }
+    cout << endl;
+}
+
+void printStringColumnPart(const uint8_t * buff, int columnIndex, int start, int end) {
+    cout << "column[" << columnIndex << "][" << start << "-" << end << "]: ";
+    char *hostArray= new char[end - start + 1];
+    cudaMemcpy(hostArray, buff, end-start, cudaMemcpyDeviceToHost);
+    hostArray[end-start] = '\0';
+    std::cout << hostArray << std::endl;
+}
+
+void printStringColumnPart(cudf::column_view const& cv, int columnIndex, int start, int end) {
+    cudf::strings_column_view scv(cv);
+    int startIndex = cudf::detail::get_value<int32_t>(scv.offsets(), start, rmm::cuda_stream_default);
+    int endIndex = cudf::detail::get_value<int32_t>(scv.offsets(), end, rmm::cuda_stream_default);
+    printStringColumnPart(scv.chars().data<uint8_t>() + startIndex, columnIndex,  startIndex, endIndex);
+}
+
+void printStringColumn(cudf::column_view const& cv, int columnIndex) {
+    cudf::strings_column_view scv(cv);
+    int endIndex = cudf::detail::get_value<int32_t>(scv.offsets(), scv.offsets().size() - 1, rmm::cuda_stream_default);
+    printStringColumnPart(scv.chars().data<uint8_t>(), columnIndex,  0, endIndex);
+    printOffsetsColumn(scv.offsets(), columnIndex);
+}
+
+void printMaskColumnPart(std::shared_ptr<rmm::device_buffer> maskBuf, int elements) {
+    if (!maskBuf) {
+        std::cout << "the column is not nullable ......................: " << std::endl;
+        return;
+    }
+    int size = maskBuf->size();
+    std::cout << "number of nulls in the part: " << cudf::count_unset_bits((uint32_t *)maskBuf->data(), 0, elements) << std::endl;
+    std::cout << "number of elements in partition: " << elements << std::endl;
+    std::cout << "null mask size: " << size << std::endl;
+    uint8_t *hostArray= new uint8_t[size];
+    cudaMemcpy(hostArray, (uint8_t *)maskBuf->data(), size, cudaMemcpyDeviceToHost);
+    for (int i = 0; i < size; ++i) {
+        std::bitset<8> x(hostArray[i]);
+        std::cout << i << ":" << x << " ";
+    }
+    std::cout << std::endl;
+}
 
 int tablePartition(int argc, char** argv) {
 
@@ -149,29 +243,80 @@ int tablePartition(int argc, char** argv) {
     cudf::io::source_info si1(input_csv_file1);
     cudf::io::csv_reader_options options1 = cudf::io::csv_reader_options::builder(si1);
     cudf::io::table_with_metadata ctable1 = cudf::io::read_csv(options1);
-    cout << "table from: " << input_csv_file1 << ", number of columns: " << ctable1.tbl->num_columns()
-         << ", first column size: " << ctable1.tbl->get_column(0).size() << endl;
+    cudf::table_view tview = ctable1.tbl->view();
+    cout << "table from: " << input_csv_file1 << ", number of columns: " << tview.num_columns()
+         << ", number of rows: " << tview.num_rows() << endl;
 
-    printLongColumn(ctable1.tbl->get_column(0).view(), 0);
+    for (int i = 0; i < tview.num_columns(); ++i) {
+        if (tview.column(i).nullable()) {
+            cout << "column " << i << " is nullable" << endl;
+            if (i == 8) {
+                if (tview.column(i).null_mask()) {
+                    cout << "null mask not null"  << endl;
+                } else
+                    cout << "null mask is null"  << endl;
+            }
+        }else
+            cout << "column " << i << " is not nullable" << endl;
+    }
 
+
+
+    cout << "first long column 0: " << endl;
+    printLongColumn(tview.column(0), 0);
+    int columnIndex = 8;
+    cout << "initial string column 8: " << endl;
+    printStringColumn(tview.column(columnIndex), columnIndex);
+    cout << endl;
+
+    // partition the table
     std::vector<cudf::size_type> columns_to_hash{};
     columns_to_hash.push_back(0);
 
     std::pair<std::unique_ptr<cudf::table>, std::vector<cudf::size_type>> pr
-        = cudf::hash_partition(ctable1.tbl->view(), columns_to_hash, 10);
+        = cudf::hash_partition(ctable1.tbl->view(), columns_to_hash, 2);
+    pr.second.push_back(pr.first->num_rows());
 
+    cout << endl;
     cout << "partitioned table, number of columns: " << pr.first->num_columns()
-         << ", first column size: " << pr.first->get_column(0).size() << endl;
+         << ", number of rows: " << pr.first->num_rows() << endl;
 
-    cout << "offsets: ";
-    for (auto offset: pr.second) {
-        cout << offset << ", ";
+    cout << "partition indexes: ";
+    for (auto pi : pr.second) {
+        cout << pi << ", ";
     }
     cout << endl;
 
-    printLongColumn(pr.first->get_column(0).view(), 0);
-    cout << "original table column:" << endl;
-    printLongColumn(ctable1.tbl->get_column(0).view(), 0);
+    cout << endl;
+    cout << "partitioned column: \n";
+//    for (int i = 0; i < pr.second.size() - 1; ++i) {
+//        printLongColumnPart(pr.first->get_column(columnIndex).view(), columnIndex, pr.second[i], pr.second[i+1]);
+//        printStringColumnPart(pr.first->get_column(columnIndex).view(), columnIndex, pr.second[i], pr.second[i+1]);
+//    }
+
+    // print offsets
+    printStringColumn(pr.first->get_column(columnIndex).view(), columnIndex);
+
+    cout << endl;
+    cudf::column_view cview = tview.column(columnIndex);
+    PartColumnView pcv(cview, pr.second);
+//    pcv.printStrOffsets();
+
+    cout << endl;
+    printNullMask(cview);
+
+    cout << endl;
+    cout << "partitioned column: " << endl;
+    for (int i = 0; i < pr.second.size() - 1; ++i) {
+//        printLongColumnPart(pcv.getDataBuffer(i), columnIndex, 0, pcv.getDataBufferSize(i));
+        printStringColumnPart(pcv.getDataBuffer(i), columnIndex, 0, pcv.getDataBufferSize(i));
+        printIntColumnPart(pcv.getOffsetBuffer(i), columnIndex, 0, pcv.getOffsetBufferSize(i));
+//        printMaskColumnPart(pcv.getMaskBuffer(i), pcv.numberOfElements(i));
+        cout << endl;
+    }
+
+    // print offsets
+
 
     return 0;
 }

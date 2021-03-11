@@ -2,7 +2,7 @@
 // Created by auyar on 3.02.2021.
 //
 
-#include "include/cudf_a2a.hpp"
+#include "cudf/cudf_a2a.hpp"
 
 #include <glog/logging.h>
 #include <chrono>
