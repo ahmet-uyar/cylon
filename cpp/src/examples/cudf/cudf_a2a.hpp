@@ -138,17 +138,6 @@ private:
     std::vector<cudf::size_type> & partIndexes;
 };
 
-/**
- * Keep track of the items to send for a target
- */
-struct PendingSends {
-    // pending tables to be sent with it's reference
-    std::queue<std::pair<std::shared_ptr<cudf::table_view>, int32_t>> tableQueue{};
-
-    // buffers to send from the current table
-    std::queue<std::shared_ptr<PendingBuffer>> bufferQueue{};
-};
-
 struct PendingReceives {
     // table variables
     // currently received columns
@@ -264,15 +253,13 @@ public:
   bool onSendComplete(int target, const void *buffer, int length) override;
 
 private:
-    bool insertBuffers(std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue);
-
     std::unique_ptr<int []> makeTableHeader(int headersLength, int ref, int numberOfColumns, int numberOfRows);
 
     void makePartTableBuffers(int target,
                               int ref,
                               std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue);
 
-    void makeTableBuffers(std::shared_ptr<cudf::table_view> table,
+    void makeTableBuffers(std::shared_ptr<cudf::table_view> tview,
                           int target,
                           int ref,
                           std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue);
@@ -320,9 +307,9 @@ private:
     std::shared_ptr<cylon::AllToAll> all_;
 
     /**
-     * Keep track of the inputs
+     * we keep a queue for each target
      */
-    std::unordered_map<int, std::shared_ptr<PendingSends>> inputs_;
+    std::unordered_map<int, std::queue<std::shared_ptr<PendingBuffer>>> sendQueues;
 
     /**
      * Keep track of the receives

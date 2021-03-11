@@ -271,7 +271,7 @@ CudfAllToAll::CudfAllToAll(std::shared_ptr<cylon::CylonContext> &ctx,
 
     // add the trackers for sending
     for (auto t : targets_) {
-        inputs_.insert(std::make_pair(t, std::make_shared<PendingSends>()));
+        sendQueues.insert(std::make_pair(t, std::queue<std::shared_ptr<PendingBuffer>>()));
     }
 
     for (auto t : sources_) {
@@ -283,12 +283,12 @@ int CudfAllToAll::insert(const std::shared_ptr<cudf::table_view> &table, int32_t
     return insert(table, target, -1);
 }
 
-int CudfAllToAll::insert(const std::shared_ptr<cudf::table_view> &table,
+int CudfAllToAll::insert(const std::shared_ptr<cudf::table_view> &tview,
                           int32_t target,
                           int32_t reference) {
     // todo: check weather we have enough memory
     // lets save the table into pending and move on
-    inputs_[target]->tableQueue.push(std::make_pair(table, reference));
+    makeTableBuffers(tview, target, reference, sendQueues[target]);
     return 1;
 }
 
@@ -300,7 +300,7 @@ int CudfAllToAll::insert(cudf::table_view &tview, std::vector<cudf::size_type> &
 
     ptview = std::make_unique<PartTableView>(tview, offsets);
     for (int i = 0; i < ptview->numberOfParts(); ++i) {
-        makePartTableBuffers(i, ref, inputs_.at(i)->bufferQueue);
+        makePartTableBuffers(i, ref, sendQueues[i]);
     }
 
     return 1;
@@ -308,25 +308,17 @@ int CudfAllToAll::insert(cudf::table_view &tview, std::vector<cudf::size_type> &
 
 bool CudfAllToAll::isComplete() {
 
-    for (const auto &pendingSend : inputs_) {
-        // if the buffer queue is not empty, first insert those buffers
-        if (!pendingSend.second->bufferQueue.empty()) {
-            bool inserted = insertBuffers(pendingSend.second->bufferQueue);
-            if (!inserted) {
+    for (auto &pair : sendQueues) {
+        // if the buffer queue is not empty, first insert those buffers to a2a
+        auto bufferQueue = &(pair.second);
+        while (!bufferQueue->empty()) {
+            auto pb = bufferQueue->front();
+            bool accepted = pb->sendBuffer(all_);
+            if (accepted) {
+                bufferQueue->pop();
+            } else {
                 return false;
             }
-        }
-
-        while (!pendingSend.second->tableQueue.empty()) {
-          auto currentPair = pendingSend.second->tableQueue.front();
-          pendingSend.second->tableQueue.pop();
-          makeTableBuffers(currentPair.first, pendingSend.first, currentPair.second, pendingSend.second->bufferQueue);
-          bool inserted = insertBuffers(pendingSend.second->bufferQueue);
-          if (!inserted) {
-              return false;
-          }
-
-          LOG(INFO) << myrank << ", inserted table for A2A. target: " << pendingSend.first << ", ref: " << currentPair.second;
         }
     }
 
@@ -340,20 +332,6 @@ bool CudfAllToAll::isComplete() {
     // all done, reset PartTableView if exists
     if (ptview)
         ptview.reset();
-
-    return true;
-}
-
-bool CudfAllToAll::insertBuffers(std::queue<std::shared_ptr<PendingBuffer>> &bufferQueue) {
-    while (!bufferQueue.empty()) {
-        auto pb = bufferQueue.front();
-        bool accepted = pb->sendBuffer(all_);
-        if (accepted) {
-            bufferQueue.pop();
-        } else {
-            return false;
-        }
-    }
 
     return true;
 }
@@ -469,16 +447,6 @@ void CudfAllToAll::makeColumnBuffers(const cudf::column_view &cw,
         throw "only uniform-size data-types and the string is supported.";
     }
 
-//    auto columnHeaders = std::make_unique<int []>(headersLength);
-//    columnHeaders[0] = 1; // it is a column header.
-//    columnHeaders[1] = columnIndex;
-//    columnHeaders[2] = (int)(cw.type().id()); // data-type of the column
-//    // whether the column has null array, 1 has the null buffer, 0 means no null buffer
-//    columnHeaders[3] = cw.nullable() ? 1 : 0;
-//    //whether the column has offsets array
-//    columnHeaders[4] = (cw.num_children() > 0) ? 1 : 0;
-//    // number of elements in the column
-//    columnHeaders[5] = cw.size();
     int headersLength = 6;
     auto columnHeaders = makeColumnHeader(headersLength,
                                           columnIndex,
@@ -539,7 +507,7 @@ void CudfAllToAll::finish() {
 
 void CudfAllToAll::close() {
     // clear the input map
-    inputs_.clear();
+    sendQueues.clear();
     // call close on the underlying all-to-all
     all_->close();
 
