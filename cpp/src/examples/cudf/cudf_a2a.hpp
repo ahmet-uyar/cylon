@@ -48,10 +48,6 @@ public:
 
     bool sendBuffer(std::shared_ptr<cylon::AllToAll> all);
 
-//    inline void setMaskBuf(std::shared_ptr<rmm::device_buffer> mb) {
-//        maskBuf = mb;
-//    }
-
 private:
     const uint8_t *buffer;
     int bufferSize;
@@ -331,8 +327,8 @@ private:
      */
     bool finished = false;
 
-    bool completed_;
-    bool finishCalled_;
+    bool completed_ = false;
+    bool finishCalled_ = false;
 
     std::unique_ptr<PartTableView> ptview;
 };

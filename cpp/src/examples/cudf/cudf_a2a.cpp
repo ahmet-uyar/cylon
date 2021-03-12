@@ -308,6 +308,9 @@ int CudfAllToAll::insert(cudf::table_view &tview, std::vector<cudf::size_type> &
 
 bool CudfAllToAll::isComplete() {
 
+    if (completed_)
+        return true;
+
     for (auto &pair : sendQueues) {
         // if the buffer queue is not empty, first insert those buffers to a2a
         auto bufferQueue = &(pair.second);
@@ -322,18 +325,34 @@ bool CudfAllToAll::isComplete() {
         }
     }
 
-    if (!finished)
-        finish();
+    if (finished && !finishCalled_) {
+        all_->finish();
+        finishCalled_ = true;
+    }
 
     if (!all_->isComplete()) {
         return false;
     }
 
+    completed_ = true;
     // all done, reset PartTableView if exists
     if (ptview)
         ptview.reset();
 
     return true;
+}
+
+void CudfAllToAll::finish() {
+    finished = true;
+}
+
+void CudfAllToAll::close() {
+    // clear the input map
+    sendQueues.clear();
+    // call close on the underlying all-to-all
+    all_->close();
+
+    delete allocator_;
 }
 
 std::unique_ptr<int []> CudfAllToAll::makeTableHeader(int headersLength,
@@ -498,20 +517,6 @@ void CudfAllToAll::makeColumnBuffers(const cudf::column_view &cw,
         pb = std::make_shared<PendingBuffer>(offsetsBuffer, offsetsSize, target);
         bufferQueue.emplace(pb);
     }
-}
-
-void CudfAllToAll::finish() {
-    finished = true;
-    all_->finish();
-}
-
-void CudfAllToAll::close() {
-    // clear the input map
-    sendQueues.clear();
-    // call close on the underlying all-to-all
-    all_->close();
-
-    delete allocator_;
 }
 
 void CudfAllToAll::constructColumn(std::shared_ptr<PendingReceives> pr) {

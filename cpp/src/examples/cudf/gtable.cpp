@@ -73,7 +73,7 @@ cylon::Status all_to_all_cudf_table(std::shared_ptr<cylon::CylonContext> ctx,
 
     // wait for the partitioned tables to arrive
     // now complete the communication
-//    all_to_all.finish();
+    all_to_all.finish();
     while (!all_to_all.isComplete()) {}
     all_to_all.close();
 
